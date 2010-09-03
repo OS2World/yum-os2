@@ -151,7 +151,8 @@ class RPMDBPackageSack(PackageSackBase):
         if cachedir is None:
             cachedir = misc.getCacheDir()
         self.setCacheDir(cachedir)
-        self._persistdir = root +  '/' + persistdir
+        # YD InstallRoot already added while reading .conf file
+        self._persistdir = persistdir
         self._have_cached_rpmdbv_data = None
         self._cached_conflicts_data = None
         # Store the result of what happens, if a transaction completes.
@@ -208,7 +209,8 @@ class RPMDBPackageSack(PackageSackBase):
     def setCacheDir(self, cachedir):
         """ Sets the internal cachedir value for the rpmdb, to be the
             "installed" directory from this parent. """
-        self._cachedir = self.root + '/' + cachedir + "/installed/"
+	# YD already root based
+        self._cachedir = cachedir + "/installed/"
 
     def readOnlyTS(self):
         if not self.ts:

@@ -176,7 +176,8 @@ class YumHistory:
         self._conn = None
         
         self.conf = yum.misc.GenericHolder()
-        self.conf.db_path  = os.path.normpath(root + '/' + db_path)
+        # YD dbpath is already root based
+        self.conf.db_path  = os.path.normpath(db_path)
         self.conf.writable = False
 
         if not os.path.exists(self.conf.db_path):

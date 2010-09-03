@@ -1340,12 +1340,14 @@ class YumRepository(Repository, config.RepoConf):
             remote_size += int(ndata.size)
 
         for (ndata, nmdtype) in downloading_with_size:
-            urlgrabber.progress.text_meter_total_size(remote_size, local_size)
+            if (hasattr(urlgrabber.progress, 'text_meter_total_size')):
+                urlgrabber.progress.text_meter_total_size(remote_size, local_size)
             if not self._retrieveMD(nmdtype, retrieve_can_fail=True):
                 self._revertOldRepoXML()
                 return False
             local_size += int(ndata.size)
-        urlgrabber.progress.text_meter_total_size(0)
+            if (hasattr(urlgrabber.progress, 'text_meter_total_size')):        
+                urlgrabber.progress.text_meter_total_size(0)
         for (ndata, nmdtype) in downloading_no_size:
             if not self._retrieveMD(nmdtype, retrieve_can_fail=True):
                 self._revertOldRepoXML()

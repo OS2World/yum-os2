@@ -1,4 +1,4 @@
-PYTHON=python
+PYTHON=python.exe
 PACKAGE = $(shell basename `pwd`)
 PYFILES = $(wildcard *.py)
 PYVER := $(shell $(PYTHON) -c 'import sys; print "%.3s" %(sys.version)')
@@ -13,7 +13,7 @@ clean:
 	rm -f *.pyc *.pyo *~
 
 install:
-	mkdir -p $(DESTDIR)/$(PKGDIR)
+	mkdir.exe -p $(DESTDIR)/$(PKGDIR)
 	for p in $(PYFILES) ; do \
 		install -m 644 $$p $(DESTDIR)/$(PKGDIR)/$$p; \
 	done

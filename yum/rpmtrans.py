@@ -347,13 +347,16 @@ class RPMTransaction:
             self._te_tuples.append((t,e,n,v,r,a))
 
         # write to a file
-        self._ts_time = time.strftime('%Y-%m-%d.%H:%M.%S')
+        if os.name == "os2":
+          self._ts_time = time.strftime('%Y-%m-%d.%H.%M.%S')
+        else:
+          self._ts_time = time.strftime('%Y-%m-%d.%H:%M.%S')
         tsfn = '%s/transaction-all.%s' % (self.base.conf.persistdir, self._ts_time)
         self.ts_all_fn = tsfn
         # to handle us being inside a chroot at this point
         # we hand back the right path to those 'outside' of the chroot() calls
         # but we're using the right path inside.
-        if self.base.conf.installroot != '/':
+        if self.base.conf.installroot != '/' and os.name != "os2":
             tsfn = tsfn.replace(os.path.normpath(self.base.conf.installroot),'')
         try:
             if not os.path.exists(os.path.dirname(tsfn)):

@@ -900,10 +900,10 @@ def setup_locale(override_codecs=True, override_time=False):
         os.environ['LC_ALL'] = 'C'
         locale.setlocale(locale.LC_ALL, 'C')
         
-    if override_codecs:
-        import codecs
-        sys.stdout = codecs.getwriter(locale.getpreferredencoding())(sys.stdout)
-        sys.stdout.errors = 'replace'
+    #if override_codecs:
+    #    import codecs
+    #    sys.stdout = codecs.getwriter(locale.getpreferredencoding())(sys.stdout)
+    #    sys.stdout.errors = 'replace'
 
 
 def get_my_lang_code():

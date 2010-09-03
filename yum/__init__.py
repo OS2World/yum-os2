@@ -92,7 +92,10 @@ class _YumPreBaseConf:
 
     def __init__(self):
         self.fn = '/etc/yum/yum.conf'
-        self.root = '/'
+	if os.name == 'os2':
+	    self.root = '/@unixroot'
+	else:
+            self.root = '/'
         self.init_plugins = True
         self.plugin_types = (plugins.TYPE_CORE,)
         self.optparser = None
@@ -1387,6 +1390,7 @@ class YumBase(depsolve.Depsolve):
             try: oldpid = int(fd.readline())
             except ValueError:
                 # bogus data in the pid file. Throw away.
+                fd.close()
                 self._unlock(lockfile)
             else:
                 if oldpid == os.getpid(): # if we own the lock, we're fine
@@ -1395,6 +1399,7 @@ class YumBase(depsolve.Depsolve):
                 except OSError, e:
                     if e[0] == errno.ESRCH:
                         # The pid doesn't exist
+                        fd.close()
                         self._unlock(lockfile)
                     else:
                         # Whoa. What the heck happened?

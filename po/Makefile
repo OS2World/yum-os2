@@ -5,7 +5,7 @@ INSTALLNLSDIR=$(DESTDIR)/usr/share/locale
 top_srcdir = "."
 
 
-MSGMERGE = intltool-update -x --gettext-package=$(NLSPACKAGE) --dist
+MSGMERGE = perl /@unixroot/usr/bin/intltool-update -x --gettext-package=$(NLSPACKAGE) --dist
 
 NLSPACKAGE = yum
 
@@ -24,7 +24,7 @@ POTFILES.in:
 	done >> $@
 
 $(NLSPACKAGE).pot: $(POTFILES) POTFILES.in
-	intltool-update --gettext-package=$(NLSPACKAGE) --pot
+	perl /@unixroot/usr/bin/intltool-update --gettext-package=$(NLSPACKAGE) --pot
 
 update-po: Makefile $(NLSPACKAGE).pot refresh-po
 

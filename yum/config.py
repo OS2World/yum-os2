@@ -594,7 +594,10 @@ class StartupConf(BaseConfig):
     errorlevel = IntOption(2, 0, 10)
 
     distroverpkg = Option('redhat-release')
-    installroot = Option('/')
+    if os.name == 'os2':
+        installroot = Option('/@unixroot')
+    else:
+        installroot = Option('/')
     config_file_path = Option('/etc/yum/yum.conf')
     plugins = BoolOption(False)
     pluginpath = ListOption(['/usr/share/yum-plugins', '/usr/lib/yum-plugins'])
