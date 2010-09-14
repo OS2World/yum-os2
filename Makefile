@@ -1,8 +1,9 @@
-SHELL=sh
+SHELL=/bin/sh
 PREFIX=/@unixroot/usr
 SYSCONFDIR=/@unixroot/etc
+LOCALSTATEDIR=/@unixroot/var
+
 SUBDIRS = rpmUtils yum etc docs po
-SUBDIRS = rpmUtils yum etc docs 
 PYFILES = $(wildcard *.py)
 PYLINT_MODULES =  *.py yum rpmUtils
 PYLINT_IGNORE = oldUtils.py
@@ -37,8 +38,8 @@ install:
 	install -m 755 bin/yum.py $(DESTDIR)$(PREFIX)/bin/yum
 	install -m 755 bin/yum-updatesd.py $(DESTDIR)$(PREFIX)/sbin/yum-updatesd
 
-	mkdir -p $(DESTDIR)/var/cache/yum
-	mkdir -p $(DESTDIR)/var/lib/yum	
+	mkdir -p $(DESTDIR)$(LOCALSTATEDIR)/cache/yum
+	mkdir -p $(DESTDIR)$(LOCALSTATEDIR)/lib/yum	
 
 	for d in $(SUBDIRS); do make PYTHON=$(PYTHON) DESTDIR=`cd $(DESTDIR); pwd` -C $$d install; [ $$? = 0 ] || exit 1; done
 

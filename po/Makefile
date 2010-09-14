@@ -1,7 +1,12 @@
+SHELL=/bin/sh
+PREFIX=/@unixroot/usr
+SYSCONFDIR=/@unixroot/etc
+LOCALSTATEDIR=/@unixroot/var
+
 INSTALL= /usr/bin/install -c
 INSTALL_PROGRAM= ${INSTALL}
 INSTALL_DATA= ${INSTALL} -m 644
-INSTALLNLSDIR=$(DESTDIR)/usr/share/locale
+INSTALLNLSDIR=$(PREFIX)/share/locale
 top_srcdir = "."
 
 
@@ -57,15 +62,15 @@ distclean: clean
 depend:
 
 install:	all
-	mkdir -p $(PREFIX)/$(INSTALLNLSDIR)
+	mkdir.exe -p $(DESTDIR)/$(INSTALLNLSDIR)
 	for n in $(CATALOGS); do \
 	    l=`basename $$n .po`; \
 	    mo=$$l.mo; \
 	    if [ ! -f $$mo ]; then continue; fi; \
-	    $(INSTALL) -m 755 -d $(PREFIX)/$(INSTALLNLSDIR)/$$l; \
-	    $(INSTALL) -m 755 -d $(PREFIX)/$(INSTALLNLSDIR)/$$l/LC_MESSAGES; \
+	    $(INSTALL) -m 755 -d $(DESTDIR)/$(INSTALLNLSDIR)/$$l; \
+	    $(INSTALL) -m 755 -d $(DESTDIR)/$(INSTALLNLSDIR)/$$l/LC_MESSAGES; \
 	    $(INSTALL) -m 644 $$mo \
-		$(PREFIX)/$(INSTALLNLSDIR)/$$l/LC_MESSAGES/$(NLSPACKAGE).mo; \
+		$(DESTDIR)/$(INSTALLNLSDIR)/$$l/LC_MESSAGES/$(NLSPACKAGE).mo; \
 	done
 
 %.mo: %.po
