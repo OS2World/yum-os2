@@ -53,10 +53,10 @@ from yum.constants import *
 from yum.update_md import UpdateMetadata
 
 # FIXME: is it really sane to use this from here?
-sys.path.append('/usr/share/yum-cli')
+sys.path.append('/@unixroot/usr/share/yum-cli')
 import callback
 
-config_file = '/etc/yum/yum-updatesd.conf'
+config_file = '/@unixroot/etc/yum/yum-updatesd.conf'
 initial_directory = os.getcwd()
 
 class UpdateEmitter(object):

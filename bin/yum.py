@@ -23,7 +23,7 @@ the yum faq at:
 """ % (sys.exc_value, sys.version)
     sys.exit(1)
 
-sys.path.insert(0, '/usr/share/yum-cli')
+sys.path.insert(0, '/@unixroot/usr/share/yum-cli')
 try:
     import yummain
     yummain.user_main(sys.argv[1:], exit_code=True)
