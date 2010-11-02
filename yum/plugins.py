@@ -129,7 +129,7 @@ class YumPlugins:
             files. Defaults to "/etc/yum/pluginconf.d".
         '''
         if not pluginconfpath:
-            pluginconfpath = ['/etc/yum/pluginconf.d']
+            pluginconfpath = ['/@unixroot/etc/yum/pluginconf.d']
 
         self.searchpath = searchpath
         self.pluginconfpath = pluginconfpath

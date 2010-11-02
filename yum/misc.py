@@ -101,7 +101,7 @@ def re_primary_filename(filename):
         positives). """
     if 'bin/' in filename:
         return True
-    if filename.startswith('/etc/'):
+    if filename.startswith('/@unixroot/etc/'):
         return True
     if filename == '/usr/lib/sendmail':
         return True
@@ -111,7 +111,7 @@ def re_primary_dirname(dirname):
     """ Tests if a dirname string, can be matched against just primary. """
     if 'bin/' in dirname:
         return True
-    if dirname.startswith('/etc/'):
+    if dirname.startswith('/@unixroot/etc/'):
         return True
     return False
 

@@ -91,7 +91,7 @@ class _YumPreBaseConf:
        you tweak it here, and when yb.conf does it's thing ... it happens. """
 
     def __init__(self):
-        self.fn = '/etc/yum/yum.conf'
+        self.fn = '/@unixroot/etc/yum/yum.conf'
 	if os.name == 'os2':
 	    self.root = '/@unixroot'
 	else:
@@ -251,9 +251,9 @@ class YumBase(depsolve.Depsolve):
 
         # TODO: Remove this block when we no longer support configs outside
         # of /etc/yum/
-        if fn == '/etc/yum/yum.conf' and not os.path.exists(fn):
+        if fn == '/@unixroot/etc/yum/yum.conf' and not os.path.exists(fn):
             # Try the old default
-            fn = '/etc/yum.conf'
+            fn = '/@unixroot/etc/yum.conf'
 
         startupconf = config.readStartupConfig(fn, root)
         startupconf.arch = arch

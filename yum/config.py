@@ -598,10 +598,10 @@ class StartupConf(BaseConfig):
         installroot = Option('/@unixroot')
     else:
         installroot = Option('/')
-    config_file_path = Option('/etc/yum/yum.conf')
+    config_file_path = Option('/@unixroot/etc/yum/yum.conf')
     plugins = BoolOption(False)
-    pluginpath = ListOption(['/usr/share/yum-plugins', '/usr/lib/yum-plugins'])
-    pluginconfpath = ListOption(['/etc/yum/pluginconf.d'])
+    pluginpath = ListOption(['/@unixroot/usr/share/yum-plugins', '/@unixroot/usr/lib/yum-plugins'])
+    pluginconfpath = ListOption(['/@unixroot/etc/yum/pluginconf.d'])
     gaftonmode = BoolOption(False)
     syslog_ident = Option()
     syslog_facility = Option('LOG_DAEMON')
@@ -620,7 +620,7 @@ class YumConf(StartupConf):
 
     keepcache = BoolOption(True)
     logfile = Option('/var/log/yum.log')
-    reposdir = ListOption(['/etc/yum/repos.d', '/etc/yum.repos.d'])
+    reposdir = ListOption(['/@unixroot/etc/yum/repos.d', '/@unixroot/etc/yum.repos.d'])
 
     commands = ListOption()
     exclude = ListOption()
