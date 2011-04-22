@@ -13,6 +13,7 @@ multilibArches = { "x86_64":  ( "athlon", "x86_64", "athlon" ),
 
 arches = {
     # ia32
+    "pentium4": "i686",
     "athlon": "i686",
     "i686": "i586",
     "geode": "i586",
