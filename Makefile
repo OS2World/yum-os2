@@ -1,4 +1,4 @@
-SHELL=/bin/sh
+SHELL=/@unixroot/usr/bin/sh
 PREFIX=/@unixroot/usr
 SYSCONFDIR=/@unixroot/etc
 LOCALSTATEDIR=/@unixroot/var

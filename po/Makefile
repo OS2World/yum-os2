@@ -1,9 +1,9 @@
-SHELL=/bin/sh
+SHELL=/@unixroot/usr/bin/sh
 PREFIX=/@unixroot/usr
 SYSCONFDIR=/@unixroot/etc
 LOCALSTATEDIR=/@unixroot/var
 
-INSTALL= /usr/bin/install -c
+INSTALL= /@unixroot/usr/bin/install -c
 INSTALL_PROGRAM= ${INSTALL}
 INSTALL_DATA= ${INSTALL} -m 644
 INSTALLNLSDIR=$(PREFIX)/share/locale
