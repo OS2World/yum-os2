@@ -35,8 +35,8 @@ install:
 	$(PYTHON) -c "import compileall; compileall.compile_dir('$(DESTDIR)$(PREFIX)/share/yum-cli', 1, '$(PYDIR)', 1)"
 
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/sbin
-	install -m 755 bin/yum.py $(DESTDIR)$(PREFIX)/bin/yum
-	install -m 755 bin/yum-updatesd.py $(DESTDIR)$(PREFIX)/sbin/yum-updatesd
+	install.exe -m 755 bin/yum.py $(DESTDIR)$(PREFIX)/bin/yum
+	install.exe -m 755 bin/yum-updatesd.py $(DESTDIR)$(PREFIX)/sbin/yum-updatesd
 
 	mkdir -p $(DESTDIR)$(LOCALSTATEDIR)/cache/yum
 	mkdir -p $(DESTDIR)$(LOCALSTATEDIR)/lib/yum	
