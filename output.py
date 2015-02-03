@@ -38,10 +38,12 @@ import yum.misc
 from rpmUtils.miscutils import checkSignals, formatRequire
 from yum.constants import *
 
-from yum import logginglevels, _
+from yum import logginglevels, _, P_
 from yum.rpmtrans import RPMBaseCallback
 from yum.packageSack import packagesNewestByNameArch
 import yum.packages
+
+import yum.history
 
 from yum.i18n import utf8_width, utf8_width_fill, utf8_text_fill
 
@@ -379,10 +381,24 @@ class YumOutput:
         for d in range(0, cols):
             data[d] = sorted(pdata[d].items())
 
+        #  We start allocating 1 char to everything but the last column, and a
+        # space between each (again, except for the last column). Because
+        # at worst we are better with:
+        # |one two three|
+        # | four        |
+        # ...than:
+        # |one two three|
+        # |            f|
+        # |our          |
+        # ...the later being what we get if we pre-allocate the last column, and
+        # thus. the space, due to "three" overflowing it's column by 2 chars.
         if columns is None:
-            columns = [1] * cols
+            columns = [1] * (cols - 1)
+            columns.append(0)
 
         total_width -= (sum(columns) + (cols - 1) + utf8_width(indent))
+        if not columns[-1]:
+            total_width += 1
         while total_width > 0:
             # Find which field all the spaces left will help best
             helps = 0
@@ -406,6 +422,10 @@ class YumOutput:
             # that column and start again with any remaining space.
             if helps:
                 diff = data[val].pop(0)[0] - columns[val]
+                if not columns[val] and (val == (cols - 1)):
+                    #  If we are going from 0 => N on the last column, take 1
+                    # for the space before the column.
+                    total_width  -= 1
                 columns[val] += diff
                 total_width  -= diff
                 continue
@@ -452,8 +472,10 @@ class YumOutput:
             (hibeg, hiend) = self._highlight(highlight)
         return (val, width, hibeg, hiend)
 
-    def fmtColumns(self, columns, msg=u'', end=u''):
-        """ Return a string for columns of data, which can overflow."""
+    def fmtColumns(self, columns, msg=u'', end=u'', text_width=utf8_width):
+        """ Return a string for columns of data, which can overflow.
+            text_width parameter finds the width of columns, this defaults to
+            utf8 but can be changed to len() if you know it'll be fine. """
 
         total_width = len(msg)
         data = []
@@ -466,11 +488,16 @@ class YumOutput:
                 continue
 
             (align, width) = self._fmt_column_align_width(width)
-            if utf8_width(val) <= width:
-                msg += u"%s "
-                val = utf8_width_fill(val, width, left=(align == u'-'),
-                                      prefix=hibeg, suffix=hiend)
-                data.append(val)
+            val_width = text_width(val)
+            if val_width <= width:
+                #  Don't use utf8_width_fill() because it sucks performance
+                # wise for 1,000s of rows. Also allows us to use len(), when
+                # we can.
+                msg += u"%s%s%s%s "
+                if (align == u'-'):
+                    data.extend([hibeg, val, " " * (width - val_width), hiend])
+                else:
+                    data.extend([hibeg, " " * (width - val_width), val, hiend])
             else:
                 msg += u"%s%s%s\n" + " " * (total_width + width + 1)
                 data.extend([hibeg, val, hiend])
@@ -495,7 +522,7 @@ class YumOutput:
         hi_cols = [highlight, 'normal', 'normal']
         rid = pkg.ui_from_repo
         columns = zip((na, ver, rid), columns, hi_cols)
-        print self.fmtColumns(columns)
+        print self.fmtColumns(columns, text_width=len)
 
     def simpleEnvraList(self, pkg, ui_overflow=False,
                         indent='', highlight=False, columns=None):
@@ -508,7 +535,7 @@ class YumOutput:
         hi_cols = [highlight, 'normal', 'normal']
         rid = pkg.ui_from_repo
         columns = zip((envra, rid), columns, hi_cols)
-        print self.fmtColumns(columns)
+        print self.fmtColumns(columns, text_width=len)
 
     def fmtKeyValFill(self, key, val):
         """ Return a key value pair in the common two column output format. """
@@ -551,27 +578,42 @@ class YumOutput:
 
     def infoOutput(self, pkg, highlight=False):
         (hibeg, hiend) = self._highlight(highlight)
-        print _("Name       : %s%s%s") % (hibeg, to_unicode(pkg.name), hiend)
-        print _("Arch       : %s") % to_unicode(pkg.arch)
+        print _("Name        : %s%s%s") % (hibeg, to_unicode(pkg.name), hiend)
+        print _("Arch        : %s") % to_unicode(pkg.arch)
         if pkg.epoch != "0":
-            print _("Epoch      : %s") % to_unicode(pkg.epoch)
-        print _("Version    : %s") % to_unicode(pkg.version)
-        print _("Release    : %s") % to_unicode(pkg.release)
-        print _("Size       : %s") % self.format_number(float(pkg.size))
-        print _("Repo       : %s") % to_unicode(pkg.repoid)
+            print _("Epoch       : %s") % to_unicode(pkg.epoch)
+        print _("Version     : %s") % to_unicode(pkg.version)
+        print _("Release     : %s") % to_unicode(pkg.release)
+        print _("Size        : %s") % self.format_number(float(pkg.size))
+        print _("Repo        : %s") % to_unicode(pkg.repoid)
         if pkg.repoid == 'installed' and 'from_repo' in pkg.yumdb_info:
-            print _("From repo  : %s") % to_unicode(pkg.yumdb_info.from_repo)
+            print _("From repo   : %s") % to_unicode(pkg.yumdb_info.from_repo)
         if self.verbose_logger.isEnabledFor(logginglevels.DEBUG_3):
-            print _("Committer  : %s") % to_unicode(pkg.committer)
-            print _("Committime : %s") % time.ctime(pkg.committime)
-            print _("Buildtime  : %s") % time.ctime(pkg.buildtime)
+            print _("Committer   : %s") % to_unicode(pkg.committer)
+            print _("Committime  : %s") % time.ctime(pkg.committime)
+            print _("Buildtime   : %s") % time.ctime(pkg.buildtime)
             if hasattr(pkg, 'installtime'):
-                print _("Installtime: %s") % time.ctime(pkg.installtime)
-        print self.fmtKeyValFill(_("Summary    : "), self._enc(pkg.summary))
+                print _("Install time: %s") % time.ctime(pkg.installtime)
+            if pkg.repoid == 'installed':
+                uid = None
+                if 'installed_by' in pkg.yumdb_info:
+                    try:
+                        uid = int(pkg.yumdb_info.installed_by)
+                    except ValueError: # In case int() fails
+                        uid = None
+                print _("Installed by: %s") % self._pwd_ui_username(uid)
+                uid = None
+                if 'changed_by' in pkg.yumdb_info:
+                    try:
+                        uid = int(pkg.yumdb_info.changed_by)
+                    except ValueError: # In case int() fails
+                        uid = None
+                print _("Changed by  : %s") % self._pwd_ui_username(uid)
+        print self.fmtKeyValFill(_("Summary     : "), self._enc(pkg.summary))
         if pkg.url:
-            print _("URL        : %s") % to_unicode(pkg.url)
-        print self.fmtKeyValFill(_("License    : "), to_unicode(pkg.license))
-        print self.fmtKeyValFill(_("Description: "), self._enc(pkg.description))
+            print _("URL         : %s") % to_unicode(pkg.url)
+        print self.fmtKeyValFill(_("License     : "), to_unicode(pkg.license))
+        print self.fmtKeyValFill(_("Description : "),self._enc(pkg.description))
         print ""
     
     def updatesObsoletesList(self, uotup, changetype, columns=None):
@@ -742,6 +784,8 @@ class YumOutput:
             pkg_names2pkgs = self._group_names2aipkgs(group.packages)
         if group.ui_description:
             print _(' Description: %s') % to_unicode(group.ui_description)
+        if group.langonly:
+            print _(' Language: %s') % group.langonly
 
         sections = ((_(' Mandatory Packages:'),   group.mandatory_packages),
                     (_(' Default Packages:'),     group.default_packages),
@@ -765,20 +809,26 @@ class YumOutput:
     def depListOutput(self, results):
         """take a list of findDeps results and 'pretty print' the output"""
         
-        for pkg in results:
+        verb = self.verbose_logger.isEnabledFor(logginglevels.DEBUG_3)
+        for pkg in sorted(results):
             print _("package: %s") % pkg.compactPrint()
             if len(results[pkg]) == 0:
                 print _("  No dependencies for this package")
                 continue
 
-            for req in results[pkg]:
+            for req in sorted(results[pkg]):
                 reqlist = results[pkg][req] 
                 print _("  dependency: %s") % prco_tuple_to_string(req)
                 if not reqlist:
                     print _("   Unsatisfied dependency")
                     continue
                 
-                for po in reqlist:
+                seen = {}
+                for po in reversed(sorted(reqlist)):
+                    key = (po.name, po.arch)
+                    if not verb and key in seen:
+                        continue
+                    seen[key] = po
                     print "   provider: %s" % po.compactPrint()
 
     def format_number(self, number, SI=0, space=' '):
@@ -847,13 +897,16 @@ class YumOutput:
         if not verbose:
             return
 
-        print _("Repo        : %s") % po.repoid
-        print _('Matched from:')
+        print _("Repo        : %s") % po.ui_from_repo
+        done = False
         for item in yum.misc.unique(values):
             item = to_utf8(item)
             if to_utf8(po.name) == item or to_utf8(po.summary) == item:
                 continue # Skip double name/summary printing
 
+            if not done:
+                print _('Matched from:')
+                done = True
             can_overflow = True
             if False: pass
             elif to_utf8(po.description) == item:
@@ -927,6 +980,26 @@ class YumOutput:
                 self.verbose_logger.log(logginglevels.INFO_1,
                                         _("Installed size: %s"),
                                         self.format_number(insize))
+
+    def reportRemoveSize(self, packages):
+        """Report the total size of packages being removed. """
+        totsize = 0
+        error = False
+        for pkg in packages:
+            # Just to be on the safe side, if for some reason getting
+            # the package size fails, log the error and don't report download
+            # size
+            try:
+                size = int(pkg.size)
+                totsize += size
+            except:
+                error = True
+                self.logger.error(_('There was an error calculating installed size'))
+                break
+        if (not error):
+            self.verbose_logger.log(logginglevels.INFO_1,
+                                    _("Installed size: %s"),
+                                    self.format_number(totsize))
             
     def listTransaction(self):
         """returns a string rep of the  transaction in an easy-to-read way."""
@@ -978,7 +1051,9 @@ class YumOutput:
             pkglist_lines.append((action, lines))
 
         for (action, pkglist) in [(_('Skipped (dependency problems)'),
-                                   self.skipped_packages),]:
+                                   self.skipped_packages),
+                                  (_('Not installed'), self._not_found_i.values()),
+                                  (_('Not available'), self._not_found_a.values())]:
             lines = []
             for po in pkglist:
                 a_wid = _add_line(lines, data, a_wid, po)
@@ -1023,30 +1098,20 @@ class YumOutput:
             if lines:
                 out.append(totalmsg)
 
-        summary = _("""
+        out.append(_("""
 Transaction Summary
 %s
-""") % ('=' * self.term.columns,)
-        out.append(summary)
-        num_in = len(self.tsInfo.installed + self.tsInfo.depinstalled)
-        num_up = len(self.tsInfo.updated + self.tsInfo.depupdated)
-        summary = _("""\
-Install   %5.5s Package(s)
-Upgrade   %5.5s Package(s)
-""") % (num_in, num_up,)
-        if num_in or num_up: # Always do this?
-            out.append(summary)
-        num_rm = len(self.tsInfo.removed + self.tsInfo.depremoved)
-        num_re = len(self.tsInfo.reinstalled)
-        num_dg = len(self.tsInfo.downgraded)
-        summary = _("""\
-Remove    %5.5s Package(s)
-Reinstall %5.5s Package(s)
-Downgrade %5.5s Package(s)
-""") % (num_rm, num_re, num_dg)
-        if num_rm or num_re or num_dg:
-            out.append(summary)
-        
+""") % ('=' * self.term.columns))
+        for action, count in (
+            (_('Install'), len(self.tsInfo.installed) + len(self.tsInfo.depinstalled)),
+            (_('Upgrade'), len(self.tsInfo.updated) + len(self.tsInfo.depupdated)),
+            (_('Remove'), len(self.tsInfo.removed) + len(self.tsInfo.depremoved)),
+            (_('Reinstall'), len(self.tsInfo.reinstalled)),
+            (_('Downgrade'), len(self.tsInfo.downgraded)),
+        ):
+            if count: out.append('%-9s %5d %s\n' % (
+                action, count, P_('Package', 'Packages', count),
+            ))
         return ''.join(out)
         
     def postTransactionOutput(self):
@@ -1121,19 +1186,31 @@ Downgrade %5.5s Package(s)
         # progress bars - this is hacky - I'm open to other options
         # One of these is a download
         if self.conf.debuglevel < 2 or not sys.stdout.isatty():
-            self.repos.setProgressBar(None)
-            self.repos.callback = None
+            progressbar = None
+            callback = None
         else:
-            self.repos.setProgressBar(YumTextMeter(fo=sys.stdout))
-            self.repos.callback = CacheProgressCallback()
+            progressbar = YumTextMeter(fo=sys.stdout)
+            callback = CacheProgressCallback()
 
         # setup our failure report for failover
         freport = (self.failureReport,(),{})
-        self.repos.setFailureCallback(freport)
+        failure_callback = freport
 
         # setup callback for CTRL-C's
-        self.repos.setInterruptCallback(self.interrupt_callback)
-        
+        interrupt_callback = self.interrupt_callback
+        if hasattr(self, 'prerepoconf'):
+            self.prerepoconf.progressbar = progressbar
+            self.prerepoconf.callback = callback
+            self.prerepoconf.failure_callback = failure_callback
+            self.prerepoconf.interrupt_callback = interrupt_callback
+        else:
+            #  Just in case some API user decides to do self.repos before
+            # calling us.
+            self.repos.setProgressBar(progressbar)
+            self.repos.callback = callback
+            self.repos.setFailureCallback(failure_callback)
+            self.repos.setInterruptCallback(interrupt_callback)
+
         # setup our depsolve progress callback
         dscb = DepSolveProgressCallBack(weakref(self))
         self.dsCallback = dscb
@@ -1143,8 +1220,17 @@ Downgrade %5.5s Package(s)
         self.setupProgressCallbacks()
     
     def setupKeyImportCallbacks(self):
-        self.repos.confirm_func = self._cli_confirm_gpg_key_import
-        self.repos.gpg_import_func = self.getKeyForRepo
+        confirm_func = self._cli_confirm_gpg_key_import
+        gpg_import_func = self.getKeyForRepo
+        gpgca_import_func = self.getCAKeyForRepo
+        if hasattr(self, 'prerepoconf'):
+            self.prerepoconf.confirm_func = confirm_func
+            self.prerepoconf.gpg_import_func = gpg_import_func
+            self.prerepoconf.gpgca_import_func = gpgca_import_func
+        else:
+            self.repos.confirm_func = confirm_func
+            self.repos.gpg_import_func = gpg_import_func
+            self.repos.gpgca_import_func = gpgca_import_func
 
     def interrupt_callback(self, cbobj):
         '''Handle CTRL-C's during downloads
@@ -1232,27 +1318,95 @@ to exit.
         return count, "".join(list(actions))
 
     def _pwd_ui_username(self, uid, limit=None):
-        # loginuid is set to -1 on init.
-        if uid is None or uid == 0xFFFFFFFF:
+        if type(uid) == type([]):
+            return [self._pwd_ui_username(u, limit) for u in uid]
+
+        # loginuid is set to      -1 (0xFFFF_FFFF) on init, in newer kernels.
+        # loginuid is set to INT_MAX (0x7FFF_FFFF) on init, in older kernels.
+        if uid is None or uid in (0xFFFFFFFF, 0x7FFFFFFF):
             loginid = _("<unset>")
             name = _("System") + " " + loginid
             if limit is not None and len(name) > limit:
                 name = loginid
             return to_unicode(name)
 
+        def _safe_split_0(text, *args):
+            """ Split gives us a [0] for everything _but_ '', this function
+                returns '' in that case. """
+            ret = text.split(*args)
+            if not ret:
+                return ''
+            return ret[0]
+
         try:
             user = pwd.getpwuid(uid)
-            fullname = user.pw_gecos.split(';', 2)[0]
+            fullname = _safe_split_0(user.pw_gecos, ';', 2)
             name = "%s <%s>" % (fullname, user.pw_name)
             if limit is not None and len(name) > limit:
-                name = "%s ... <%s>" % (fullname.split()[0], user.pw_name)
+                name = "%s ... <%s>" % (_safe_split_0(fullname), user.pw_name)
                 if len(name) > limit:
                     name = "<%s>" % user.pw_name
             return to_unicode(name)
         except KeyError:
             return to_unicode(str(uid))
 
+    @staticmethod
+    def _historyRangeRTIDs(old, tid):
+        ''' Convert a user "TID" string of 2..4 into: (2, 4). '''
+        def str2int(x):
+            try:
+                if x == 'last' or x.startswith('last-'):
+                    tid = old.tid
+                    if x.startswith('last-'):
+                        off = int(x[len('last-'):])
+                        if off <= 0:
+                            int("z")
+                        tid -= off
+                    return tid
+                return int(x)
+            except ValueError:
+                return None
+
+        if '..' not in tid:
+            return None
+        btid, etid = tid.split('..', 2)
+        btid = str2int(btid)
+        if btid > old.tid:
+            return None
+        elif btid <= 0:
+            return None
+        etid = str2int(etid)
+        if etid > old.tid:
+            return None
+
+        if btid is None or etid is None:
+            return None
+
+        # Have a range ... do a "merged" transaction.
+        if btid > etid:
+            btid, etid = etid, btid
+        return (btid, etid)
+
+    def _historyRangeTIDs(self, rtids):
+        ''' Convert a list of ranged tid typles into all the tids needed, Eg.
+            [(2,4), (6,8)] == [2, 3, 4, 6, 7, 8]. '''
+        tids = set()
+        last_end = -1 # This just makes displaying it easier...
+        for mtid in sorted(rtids):
+            if mtid[0] < last_end:
+                self.logger.warn(_('Skipping merged transaction %d to %d, as it overlaps' % (mtid[0], mtid[1])))
+                continue # Don't do overlapping
+            last_end = mtid[1]
+            for num in range(mtid[0], mtid[1] + 1):
+                tids.add(num)
+        return tids
+
     def _history_list_transactions(self, extcmds):
+        old = self.history.last()
+        if old is None:
+            self.logger.critical(_('No transactions'))
+            return None, None
+
         tids = set()
         pats = []
         usertids = extcmds[1:]
@@ -1266,6 +1420,10 @@ to exit.
                 int(tid)
                 tids.add(tid)
             except ValueError:
+                rtid = self._historyRangeRTIDs(old, tid)
+                if rtid:
+                    tids.update(self._historyRangeTIDs([rtid]))
+                    continue
                 pats.append(tid)
         if pats:
             tids.update(self.history.search(pats))
@@ -1280,36 +1438,72 @@ to exit.
 
         tids, printall = self._history_list_transactions(extcmds)
         if tids is None:
-            return 1, ['Failed history info']
+            return 1, ['Failed history list']
+
+        limit = 20
+        if printall:
+            limit = None
+
+        old_tids = self.history.old(tids, limit=limit)
+        done = 0
+        if self.conf.history_list_view == 'users':
+            uids = [1,2]
+        elif self.conf.history_list_view == 'commands':
+            uids = [1]
+        else:
+            assert self.conf.history_list_view == 'single-user-commands'
+            uids = set()
+            blanks = 0
+            for old in old_tids:
+                if not printall and done >= limit:
+                    break
+
+                done += 1
+                if old.cmdline is None:
+                    blanks += 1
+                uids.add(old.loginuid)
+            if len(uids) == 1 and blanks > (done / 2):
+                uids.add('blah')
 
         fmt = "%s | %s | %s | %s | %s"
+        if len(uids) == 1:
+            name = _("Command line")
+        else:
+            name = _("Login user")
         print fmt % (utf8_width_fill(_("ID"), 6, 6),
-                     utf8_width_fill(_("Login user"), 22, 22),
+                     utf8_width_fill(name, 24, 24),
                      utf8_width_fill(_("Date and time"), 16, 16),
                      utf8_width_fill(_("Action(s)"), 14, 14),
                      utf8_width_fill(_("Altered"), 7, 7))
         print "-" * 79
         fmt = "%6u | %s | %-16.16s | %s | %4u"
         done = 0
-        limit = 20
-        if printall:
-            limit = None
-        for old in self.history.old(tids, limit=limit):
+        for old in old_tids:
             if not printall and done >= limit:
                 break
 
             done += 1
-            name = self._pwd_ui_username(old.loginuid, 22)
+            if len(uids) == 1:
+                name = old.cmdline or ''
+            else:
+                name = self._pwd_ui_username(old.loginuid, 24)
             tm = time.strftime("%Y-%m-%d %H:%M",
                                time.localtime(old.beg_timestamp))
             num, uiacts = self._history_uiactions(old.trans_data)
-            name   = utf8_width_fill(name,   22, 22)
+            name   = utf8_width_fill(name,   24, 24)
             uiacts = utf8_width_fill(uiacts, 14, 14)
             rmark = lmark = ' '
             if old.return_code is None:
                 rmark = lmark = '*'
             elif old.return_code:
                 rmark = lmark = '#'
+                # We don't check .errors, because return_code will be non-0
+            elif old.output:
+                rmark = lmark = 'E'
+            elif old.rpmdb_problems:
+                rmark = lmark = 'P'
+            elif old.trans_skip:
+                rmark = lmark = 's'
             if old.altered_lt_rpmdb:
                 rmark = '<'
             if old.altered_gt_rpmdb:
@@ -1370,21 +1564,41 @@ to exit.
         return old[0]
 
     def historyInfoCmd(self, extcmds):
-        tids = set()
-        pats = []
-        for tid in extcmds[1:]:
+        def str2int(x):
             try:
-                int(tid)
-                tids.add(tid)
+                return int(x)
             except ValueError:
-                pats.append(tid)
+                return None
+
+        tids = set()
+        mtids = set()
+        pats = []
+        old = self.history.last()
+        if old is None:
+            self.logger.critical(_('No transactions'))
+            return 1, ['Failed history info']
+
+        for tid in extcmds[1:]:
+            if self._historyRangeRTIDs(old, tid):
+                # Have a range ... do a "merged" transaction.
+                mtids.add(self._historyRangeRTIDs(old, tid))
+                continue
+            elif str2int(tid) is not None:
+                tids.add(str2int(tid))
+                continue
+            pats.append(tid)
         if pats:
             tids.update(self.history.search(pats))
+        utids = tids.copy()
+        if mtids:
+            mtids = sorted(mtids)
+            tids.update(self._historyRangeTIDs(mtids))
 
         if not tids and len(extcmds) < 2:
             old = self.history.last(complete_transactions_only=False)
             if old is not None:
                 tids.add(old.tid)
+                utids.add(old.tid)
 
         if not tids:
             self.logger.critical(_('No transaction ID, or package, given'))
@@ -1396,6 +1610,10 @@ to exit.
             lastdbv = lastdbv.end_rpmdbversion
 
         done = False
+        bmtid, emtid = -1, -1
+        mobj = None
+        if mtids:
+            bmtid, emtid = mtids.pop(0)
         for tid in self.history.old(tids):
             if lastdbv is not None and tid.tid == lasttid:
                 #  If this is the last transaction, is good and it doesn't
@@ -1405,15 +1623,93 @@ to exit.
                     tid.altered_gt_rpmdb = True
             lastdbv = None
 
+            if tid.tid >= bmtid and tid.tid <= emtid:
+                if mobj is None:
+                    mobj = yum.history.YumMergedHistoryTransaction(tid)
+                else:
+                    mobj.merge(tid)
+            elif mobj is not None:
+                if done:
+                    print "-" * 79
+                done = True
+
+                self._historyInfoCmd(mobj)
+                mobj = None
+                if mtids:
+                    bmtid, emtid = mtids.pop(0)
+                    if tid.tid >= bmtid and tid.tid <= emtid:
+                        mobj = yum.history.YumMergedHistoryTransaction(tid)
+
+            if tid.tid in utids:
+                if done:
+                    print "-" * 79
+                done = True
+
+                self._historyInfoCmd(tid, pats)
+
+        if mobj is not None:
             if done:
                 print "-" * 79
-            done = True
-            self._historyInfoCmd(tid, pats)
+
+            self._historyInfoCmd(mobj)
+
+    def _hpkg2from_repo(self, hpkg):
+        """ Given a pkg, find the ipkg.ui_from_repo ... if none, then
+            get an apkg. ... and put a ? in there. """
+        ipkgs = self.rpmdb.searchPkgTuple(hpkg.pkgtup)
+        if not ipkgs:
+            apkgs = self.pkgSack.searchPkgTuple(hpkg.pkgtup)
+            if not apkgs:
+                return '?'
+            return '@?' + str(apkgs[0].repoid)
+
+        return ipkgs[0].ui_from_repo
 
     def _historyInfoCmd(self, old, pats=[]):
         name = self._pwd_ui_username(old.loginuid)
 
-        print _("Transaction ID :"), old.tid
+        _pkg_states_installed = {'i' : _('Installed'), 'e' : _('Erased'),
+                                 'o' : _('Updated'), 'n' : _('Downgraded')}
+        _pkg_states_available = {'i' : _('Installed'), 'e' : _('Not installed'),
+                                 'o' : _('Older'), 'n' : _('Newer')}
+        # max() only in 2.5.z
+        maxlen = sorted([len(x) for x in (_pkg_states_installed.values() +
+                                          _pkg_states_available.values())])[-1]
+        _pkg_states_installed['maxlen'] = maxlen
+        _pkg_states_available['maxlen'] = maxlen
+        def _simple_pkg(pkg, prefix_len, was_installed=False, highlight=False,
+                        pkg_max_len=0):
+            prefix = " " * prefix_len
+            if was_installed:
+                _pkg_states = _pkg_states_installed
+            else:
+                _pkg_states = _pkg_states_available
+            state  = _pkg_states['i']
+            ipkgs = self.rpmdb.searchNames([hpkg.name])
+            ipkgs.sort()
+            if not ipkgs:
+                state  = _pkg_states['e']
+            elif hpkg.pkgtup in (ipkg.pkgtup for ipkg in ipkgs):
+                pass
+            elif ipkgs[-1] > hpkg:
+                state  = _pkg_states['o']
+            elif ipkgs[0] < hpkg:
+                state  = _pkg_states['n']
+            else:
+                assert False, "Impossible, installed not newer and not older"
+            if highlight:
+                (hibeg, hiend) = self._highlight('bold')
+            else:
+                (hibeg, hiend) = self._highlight('normal')
+            state = utf8_width_fill(state, _pkg_states['maxlen'])
+            print "%s%s%s%s %-*s %s" % (prefix, hibeg, state, hiend,
+                                        pkg_max_len, hpkg,
+                                        self._hpkg2from_repo(hpkg))
+
+        if type(old.tid) == type([]):
+            print _("Transaction ID :"), "%u..%u" % (old.tid[0], old.tid[-1])
+        else:
+            print _("Transaction ID :"), old.tid
         begtm = time.ctime(old.beg_timestamp)
         print _("Begin time     :"), begtm
         if old.beg_rpmdbversion is not None:
@@ -1434,39 +1730,83 @@ to exit.
                         break
                     sofar += len(begtms[i]) + 1
                 endtm = (' ' * sofar) + endtm[sofar:]
-            diff = _("(%s seconds)") % (old.end_timestamp - old.beg_timestamp)
+            diff = old.end_timestamp - old.beg_timestamp
+            if diff < 5 * 60:
+                diff = _("(%u seconds)") % diff
+            elif diff < 5 * 60 * 60:
+                diff = _("(%u minutes)") % (diff / 60)
+            elif diff < 5 * 60 * 60 * 24:
+                diff = _("(%u hours)") % (diff / (60 * 60))
+            else:
+                diff = _("(%u days)") % (diff / (60 * 60 * 24))
             print _("End time       :"), endtm, diff
         if old.end_rpmdbversion is not None:
             if old.altered_gt_rpmdb:
                 print _("End rpmdb      :"), old.end_rpmdbversion, "**"
             else:
                 print _("End rpmdb      :"), old.end_rpmdbversion
-        print _("User           :"), name
-        if old.return_code is None:
+        if type(name) == type([]):
+            for name in name:
+                print _("User           :"), name
+        else:
+            print _("User           :"), name
+        if type(old.return_code) == type([]):
+            codes = old.return_code
+            if codes[0] is None:
+                print _("Return-Code    :"), "**", _("Aborted"), "**"
+                codes = codes[1:]
+            if codes:
+                print _("Return-Code    :"), _("Failures:"), ", ".join(codes)
+        elif old.return_code is None:
             print _("Return-Code    :"), "**", _("Aborted"), "**"
         elif old.return_code:
             print _("Return-Code    :"), _("Failure:"), old.return_code
         else:
             print _("Return-Code    :"), _("Success")
-        print _("Transaction performed with:")
+            
+        if old.cmdline is not None:
+            if type(old.cmdline) == type([]):
+                for cmdline in old.cmdline:
+                    print _("Command Line   :"), cmdline
+            else:
+                print _("Command Line   :"), old.cmdline
+
+        if type(old.tid) != type([]):
+            addon_info = self.history.return_addon_data(old.tid)
+
+            # for the ones we create by default - don't display them as there
+            default_addons = set(['config-main', 'config-repos', 'saved_tx'])
+            non_default = set(addon_info).difference(default_addons)
+            if len(non_default) > 0:
+                    print _("Additional non-default information stored: %d" 
+                                % len(non_default))
+
+        if old.trans_with:
+            # This is _possible_, but not common
+            print _("Transaction performed with:")
+            pkg_max_len = max((len(str(hpkg)) for hpkg in old.trans_with))
         for hpkg in old.trans_with:
-            prefix = " " * 4
-            state  = _('Installed')
-            ipkgs = self.rpmdb.searchNames([hpkg.name])
-            ipkgs.sort()
-            if not ipkgs:
-                state  = _('Erased')
-            elif hpkg.pkgtup in (ipkg.pkgtup for ipkg in ipkgs):
-                pass
-            elif ipkgs[-1] > hpkg:
-                state  = _('Updated')
-            elif ipkgs[0] < hpkg:
-                state  = _('Downgraded')
-            else: # multiple versions installed, both older and newer
-                state  = _('Weird')
-            print "%s%s %s" % (prefix, utf8_width_fill(state, 12), hpkg)
+            _simple_pkg(hpkg, 4, was_installed=True, pkg_max_len=pkg_max_len)
         print _("Packages Altered:")
         self.historyInfoCmdPkgsAltered(old, pats)
+
+        if old.trans_skip:
+            print _("Packages Skipped:")
+            pkg_max_len = max((len(str(hpkg)) for hpkg in old.trans_skip))
+        for hpkg in old.trans_skip:
+            _simple_pkg(hpkg, 4, pkg_max_len=pkg_max_len)
+
+        if old.rpmdb_problems:
+            print _("Rpmdb Problems:")
+        for prob in old.rpmdb_problems:
+            key = "%s%s: " % (" " * 4, prob.problem)
+            print self.fmtKeyValFill(key, prob.text)
+            if prob.packages:
+                pkg_max_len = max((len(str(hpkg)) for hpkg in prob.packages))
+            for hpkg in prob.packages:
+                _simple_pkg(hpkg, 8, was_installed=True, highlight=hpkg.main,
+                            pkg_max_len=pkg_max_len)
+
         if old.output:
             print _("Scriptlet output:")
             num = 0
@@ -1480,8 +1820,33 @@ to exit.
                 num += 1
                 print "%4d" % num, line
 
+    _history_state2uistate = {'True-Install' : _('Install'),
+                              'Install'      : _('Install'),
+                              'Dep-Install'  : _('Dep-Install'),
+                              'Obsoleted'    : _('Obsoleted'),
+                              'Obsoleting'   : _('Obsoleting'),
+                              'Erase'        : _('Erase'),
+                              'Reinstall'    : _('Reinstall'),
+                              'Downgrade'    : _('Downgrade'),
+                              'Downgraded'   : _('Downgraded'),
+                              'Update'       : _('Update'),
+                              'Updated'      : _('Updated'),
+                              }
     def historyInfoCmdPkgsAltered(self, old, pats=[]):
         last = None
+        #  Note that these don't use _simple_pkg() because we are showing what
+        # happened to them in the transaction ... not the difference between the
+        # version in the transaction and now.
+        all_uistates = self._history_state2uistate
+        maxlen = 0
+        pkg_max_len = 0
+        for hpkg in old.trans_data:
+            uistate = all_uistates.get(hpkg.state, hpkg.state)
+            if maxlen < len(uistate):
+                maxlen = len(uistate)
+            if pkg_max_len < len(str(hpkg)):
+                pkg_max_len = len(str(hpkg))
+
         for hpkg in old.trans_data:
             prefix = " " * 4
             if not hpkg.done:
@@ -1498,19 +1863,8 @@ to exit.
             # so we have to do it by hand ... *sigh*.
             cn = hpkg.ui_nevra
 
-            uistate = {'True-Install' : _('Install'),
-                       'Install'      : _('Install'),
-                       'Dep-Install'  : _('Dep-Install'),
-                       'Obsoleted'    : _('Obsoleted'),
-                       'Obsoleting'   : _('Obsoleting'),
-                       'Erase'        : _('Erase'),
-                       'Reinstall'    : _('Reinstall'),
-                       'Downgrade'    : _('Downgrade'),
-                       'Downgraded'   : _('Downgraded'),
-                       'Update'       : _('Update'),
-                       'Updated'      : _('Updated'),
-                       }.get(hpkg.state, hpkg.state)
-            uistate = utf8_width_fill(uistate, 12, 12)
+            uistate = all_uistates.get(hpkg.state, hpkg.state)
+            uistate = utf8_width_fill(uistate, maxlen)
             # Should probably use columns here...
             if False: pass
             elif (last is not None and
@@ -1518,18 +1872,18 @@ to exit.
                   hpkg.state == 'Update'):
                 ln = len(hpkg.name) + 1
                 cn = (" " * ln) + cn[ln:]
-                print "%s%s%s%s %s" % (prefix, hibeg, uistate, hiend, cn)
             elif (last is not None and
                   last.state == 'Downgrade' and last.name == hpkg.name and
                   hpkg.state == 'Downgraded'):
                 ln = len(hpkg.name) + 1
                 cn = (" " * ln) + cn[ln:]
-                print "%s%s%s%s %s" % (prefix, hibeg, uistate, hiend, cn)
             else:
                 last = None
                 if hpkg.state in ('Updated', 'Downgrade'):
                     last = hpkg
-                print "%s%s%s%s %s" % (prefix, hibeg, uistate, hiend, cn)
+            print "%s%s%s%s %-*s %s" % (prefix, hibeg, uistate, hiend,
+                                        pkg_max_len, cn,
+                                        self._hpkg2from_repo(hpkg))
 
     def historySummaryCmd(self, extcmds):
         tids, printall = self._history_list_transactions(extcmds)
@@ -1587,9 +1941,142 @@ to exit.
                 count, uiacts = self._history_uiactions(hpkgs)
                 uperiod = _period2user[period]
                 # Should probably use columns here, esp. for uiacts?
-                print fmt % (utf8_width_fill(name, 22, 22),
+                print fmt % (utf8_width_fill(name, 26, 26),
                              utf8_width_fill(uperiod, 19, 19),
                              utf8_width_fill(uiacts, 16, 16), count)
+
+    def historyAddonInfoCmd(self, extcmds):
+        tid = None
+        if len(extcmds) > 1:
+            tid = extcmds[1]
+            if tid == 'last':
+                tid = None
+        if tid is not None:
+            try:
+                int(tid)
+            except ValueError:
+                self.logger.critical(_('Bad transaction ID given'))
+                return 1, ['Failed history addon-info']
+
+        if tid is not None:
+            old = self.history.old(tids=[tid])
+        else:
+            old = [self.history.last(complete_transactions_only=False)]
+            if old[0] is None:
+                self.logger.critical(_('No transaction ID, or package, given'))
+                return 1, ['Failed history addon-info']
+
+        if not old:
+            self.logger.critical(_('No Transaction %s found') % tid)
+            return 1, ['Failed history addon-info']
+            
+        hist_data = old[0]
+        addon_info = self.history.return_addon_data(hist_data.tid)
+        if len(extcmds) <= 2:
+            print _("Transaction ID:"), hist_data.tid
+            print _('Available additional history information:')
+            for itemname in self.history.return_addon_data(hist_data.tid):
+                print '  %s' % itemname
+            print ''
+            
+            return 0, ['history addon-info']
+        
+        for item in extcmds[2:]:
+            if item in addon_info:
+                print '%s:' % item
+                print self.history.return_addon_data(hist_data.tid, item)
+            else:
+                print _('%s: No additional data found by this name') % item
+
+            print ''
+
+    def historyPackageListCmd(self, extcmds):
+        """ Shows the user a list of data about the history, from the point
+            of a package(s) instead of via. transactions. """
+        tids = self.history.search(extcmds)
+        limit = None
+        if extcmds and not tids:
+            self.logger.critical(_('Bad transaction IDs, or package(s), given'))
+            return 1, ['Failed history packages-list']
+        if not tids:
+            limit = 20
+
+        all_uistates = self._history_state2uistate
+
+        fmt = "%s | %s | %s"
+        # REALLY Needs to use columns!
+        print fmt % (utf8_width_fill(_("ID"), 6, 6),
+                     utf8_width_fill(_("Action(s)"), 14, 14),
+                     utf8_width_fill(_("Package"), 53, 53))
+        print "-" * 79
+        fmt = "%6u | %s | %-50s"
+        num = 0
+        for old in self.history.old(tids, limit=limit):
+            if limit is not None and num and (num +len(old.trans_data)) > limit:
+                break
+            last = None
+
+            # Copy and paste from list ... uh.
+            rmark = lmark = ' '
+            if old.return_code is None:
+                rmark = lmark = '*'
+            elif old.return_code:
+                rmark = lmark = '#'
+                # We don't check .errors, because return_code will be non-0
+            elif old.output:
+                rmark = lmark = 'E'
+            elif old.rpmdb_problems:
+                rmark = lmark = 'P'
+            elif old.trans_skip:
+                rmark = lmark = 's'
+            if old.altered_lt_rpmdb:
+                rmark = '<'
+            if old.altered_gt_rpmdb:
+                lmark = '>'
+
+            for hpkg in old.trans_data: # Find a pkg to go with each cmd...
+                if limit is None:
+                    x,m,u = yum.packages.parsePackages([hpkg], extcmds)
+                    if not x and not m:
+                        continue
+
+                uistate = all_uistates.get(hpkg.state, hpkg.state)
+                uistate = utf8_width_fill(uistate, 14)
+
+                #  To chop the name off we need nevra strings, str(pkg) gives
+                # envra so we have to do it by hand ... *sigh*.
+                cn = hpkg.ui_nevra
+
+                # Should probably use columns here...
+                if False: pass
+                elif (last is not None and
+                      last.state == 'Updated' and last.name == hpkg.name and
+                      hpkg.state == 'Update'):
+                    ln = len(hpkg.name) + 1
+                    cn = (" " * ln) + cn[ln:]
+                elif (last is not None and
+                      last.state == 'Downgrade' and last.name == hpkg.name and
+                      hpkg.state == 'Downgraded'):
+                    ln = len(hpkg.name) + 1
+                    cn = (" " * ln) + cn[ln:]
+                else:
+                    last = None
+                    if hpkg.state in ('Updated', 'Downgrade'):
+                        last = hpkg
+
+                num += 1
+                print fmt % (old.tid, uistate, cn), "%s%s" % (lmark,rmark)
+
+        # And, again, copy and paste...
+        lastdbv = self.history.last()
+        if lastdbv is None:
+            self._rpmdb_warn_checks(warn=False)
+        else:
+            #  If this is the last transaction, is good and it doesn't
+            # match the current rpmdb ... then mark it as bad.
+            rpmdbv  = self.rpmdb.simpleVersion(main_only=True)[0]
+            if lastdbv.end_rpmdbversion != rpmdbv:
+                self._rpmdb_warn_checks()
 
 
 class DepSolveProgressCallBack:
@@ -1603,13 +2090,17 @@ class DepSolveProgressCallBack:
 
     def pkgAdded(self, pkgtup, mode):
         modedict = { 'i': _('installed'),
-                     'u': _('updated'),
-                     'o': _('obsoleted'),
-                     'e': _('erased')}
+                     'u': _('an update'),
+                     'e': _('erased'),
+                     'r': _('reinstalled'),
+                     'd': _('a downgrade'),
+                     'o': _('obsoleting'),
+                     'ud': _('updated'),
+                     'od': _('obsoleted'),}
         (n, a, e, v, r) = pkgtup
         modeterm = modedict[mode]
         self.verbose_logger.log(logginglevels.INFO_2,
-            _('---> Package %s.%s %s:%s-%s set to be %s'), n, a, e, v, r,
+            _('---> Package %s.%s %s:%s-%s will be %s'), n, a, e, v, r,
             modeterm)
         
     def start(self):
@@ -1639,6 +2130,10 @@ class DepSolveProgressCallBack:
             _('--> Processing Dependency: %s for package: %s'), formatted_req,
             po)
     
+    def groupRemoveReq(self, po, hits):
+        self.verbose_logger.log(logginglevels.INFO_2,
+            _('---> Keeping package: %s'), po)
+
     def unresolved(self, msg):
         self.verbose_logger.log(logginglevels.INFO_2, _('--> Unresolved Dependency: %s'),
             msg)
@@ -1660,24 +2155,73 @@ class DepSolveProgressCallBack:
         if not yb:
             return msg
         
-        ipkgs = set()
-        for pkg in sorted(yb.rpmdb.getProvides(needname)):
-            ipkgs.add(pkg.pkgtup)
+        def _msg_pkg(action, pkg, needname):
+            " Add a package to the message, including any provides matches. "
+            msg = _('\n    %s: %s (%s)') % (action, pkg, pkg.ui_from_repo)
+            needtup = (needname, None, (None, None, None))
+            done = False
+            for pkgtup in pkg.matchingPrcos('provides', needtup):
+                done = True
+                msg += _('\n        %s') % yum.misc.prco_tuple_to_string(pkgtup)
+            if not done:
+                msg += _('\n        Not found')
+            return msg
+
+        def _run_inst_pkg(pkg, msg):
+            nevr = (pkg.name, pkg.epoch, pkg.version, pkg.release)
+            if nevr in seen_pkgs or (pkg.verEQ(last) and pkg.arch == last.arch):
+                return msg
+
+            seen_pkgs.add(nevr)
             action = _('Installed')
-            if yb.tsInfo.getMembersWithState(pkg.pkgtup, TS_REMOVE_STATES):
+            rmed = yb.tsInfo.getMembersWithState(pkg.pkgtup, TS_REMOVE_STATES)
+            if rmed:
                 action = _('Removing')
-            msg += _('\n    %s: %s (%s)') % (action, pkg, pkg.ui_from_repo)
-        last = None
-        for pkg in sorted(yb.pkgSack.getProvides(needname)):
+            msg += _msg_pkg(action, pkg, needname)
+            # These should be the only three things we care about:
+            relmap = {'updatedby' : _('Updated By'),
+                      'downgradedby' : _('Downgraded By'),
+                      'obsoletedby' :  _('Obsoleted By'),
+                      }
+            for txmbr in rmed:
+                for (rpkg, rtype) in txmbr.relatedto:
+                    if rtype not in relmap:
+                        continue
+                    nevr = (rpkg.name, rpkg.epoch, rpkg.version, rpkg.release)
+                    seen_pkgs.add(nevr)
+                    msg += _msg_pkg(relmap[rtype], rpkg, needname)
+            return msg
+
+        def _run_avail_pkg(pkg, msg):
             #  We don't want to see installed packages, or N packages of the
             # same version, from different repos.
-            if pkg.pkgtup in ipkgs or pkg.verEQ(last):
-                continue
-            last = pkg
+            nevr = (pkg.name, pkg.epoch, pkg.version, pkg.release)
+            if nevr in seen_pkgs or (pkg.verEQ(last) and pkg.arch == last.arch):
+                return False, last, msg
+            seen_pkgs.add(nevr)
             action = _('Available')
             if yb.tsInfo.getMembersWithState(pkg.pkgtup, TS_INSTALL_STATES):
                 action = _('Installing')
-            msg += _('\n    %s: %s (%s)') % (action, pkg, pkg.repoid)
+            msg += _msg_pkg(action, pkg, needname)
+            return True, pkg, msg
+
+        last = None
+        seen_pkgs = set()
+        for pkg in sorted(yb.rpmdb.getProvides(needname)):
+            msg = _run_inst_pkg(pkg, msg)
+
+        available_names = set()
+        for pkg in sorted(yb.pkgSack.getProvides(needname)):
+            tst, last, msg = _run_avail_pkg(pkg, msg)
+            if tst:
+                available_names.add(pkg.name)
+
+        last = None
+        for pkg in sorted(yb.rpmdb.searchNames(available_names)):
+            msg = _run_inst_pkg(pkg, msg)
+        last = None
+        for pkg in sorted(yb.pkgSack.searchNames(available_names)):
+            tst, last, msg = _run_avail_pkg(pkg, msg)
         return msg
     
     def procConflict(self, name, confname):
@@ -1732,7 +2276,7 @@ def _pkgname_ui(ayum, pkgname, ts_states=None):
     if ts_states is None:
         #  Note 'd' is a placeholder for downgrade, and
         # 'r' is a placeholder for reinstall. Neither exist atm.
-        ts_states = ('d', 'e', 'i', 'r', 'u')
+        ts_states = ('d', 'e', 'i', 'r', 'u', 'od', 'ud')
 
     matches = []
     def _cond_add(po):
@@ -1792,13 +2336,22 @@ class YumCliRPMCallBack(RPMBaseCallback):
 
     #  Installing things have pkg objects passed to the events, so only need to
     # lookup for erased/obsoleted.
-    def pkgname_ui(self, pkgname, ts_states=('e', None)):
+    def pkgname_ui(self, pkgname, ts_states=('e', 'od', 'ud', None)):
         """ Get more information on a simple pkgname, if we can. """
         return _pkgname_ui(self.ayum, pkgname, ts_states)
 
     def event(self, package, action, te_current, te_total, ts_current, ts_total):
         # this is where a progress bar would be called
         process = self.action[action]
+
+        if not hasattr(self, '_max_action_wid'):
+            wid1 = 0
+            for val in self.action.values():
+                wid_val = utf8_width(val)
+                if wid1 < wid_val:
+                    wid1 = wid_val
+            self._max_action_wid = wid1
+        wid1 = self._max_action_wid
         
         if type(package) not in types.StringTypes:
             pkgname = str(package)
@@ -1813,7 +2366,7 @@ class YumCliRPMCallBack(RPMBaseCallback):
         
         if self.output and (sys.stdout.isatty() or te_current == te_total):
             (fmt, wid1, wid2) = self._makefmt(percent, ts_current, ts_total,
-                                              pkgname=pkgname)
+                                              pkgname=pkgname, wid1=wid1)
             msg = fmt % (utf8_width_fill(process, wid1, wid1),
                          utf8_width_fill(pkgname, wid2, wid2))
             if msg != self.lastmsg:
@@ -1829,7 +2382,7 @@ class YumCliRPMCallBack(RPMBaseCallback):
             sys.stdout.flush()
 
     def _makefmt(self, percent, ts_current, ts_total, progress = True,
-                 pkgname=None):
+                 pkgname=None, wid1=15):
         l = len(str(ts_total))
         size = "%s.%s" % (l, l)
         fmt_done = "%" + size + "s/%" + size + "s"
@@ -1843,7 +2396,7 @@ class YumCliRPMCallBack(RPMBaseCallback):
             pnl = utf8_width(pkgname)
 
         overhead  = (2 * l) + 2 # Length of done, above
-        overhead += 19          # Length of begining
+        overhead +=  2+ wid1 +2 # Length of begining ("  " action " :")
         overhead +=  1          # Space between pn and done
         overhead +=  2          # Ends for progress
         overhead +=  1          # Space for end
@@ -1874,7 +2427,7 @@ class YumCliRPMCallBack(RPMBaseCallback):
             bar = fmt_bar % (self.mark * marks, )
             fmt = "  %s: %s " + bar + " " + done
             wid2 = pnl
-        return fmt, 15, wid2
+        return fmt, wid1, wid2
 
 
 def progressbar(current, total, name=None):

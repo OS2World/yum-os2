@@ -21,6 +21,7 @@ import yum
 from cli import *
 from yum import Errors
 from yum import _
+from yum.i18n import utf8_width
 from yum import logginglevels
 from optparse import OptionGroup
 
@@ -57,6 +58,11 @@ def get_process_info(pid):
     if not pid:
         return
 
+    try:
+        pid = int(pid)
+    except ValueError, e:
+        return
+        
     # Maybe true if /proc isn't mounted, or not Linux ... or something.
     if (not os.path.exists("/proc/%d/status" % pid) or
         not os.path.exists("/proc/stat") or
@@ -100,10 +106,10 @@ def get_process_info(pid):
     return ps
 
 def show_lock_owner(pid, logger):
-    if not pid:
-        return
-
     ps = get_process_info(pid)
+    if not ps:
+        return None
+
     # This yumBackend isn't very friendly, so...
     if ps['name'] == 'yumBackend.py':
         nmsg = _("  The other application is: PackageKit")
@@ -120,6 +126,30 @@ def show_lock_owner(pid, logger):
                     (time.ctime(ps['start_time']), ago))
     logger.critical(_("    State  : %s, pid: %d") % (ps['state'], pid))
 
+    return ps
+
+
+def exception2msg(e):
+    """ DIE python DIE! Which one works:
+        to_unicode(e.value); unicode(e); str(e); 
+        Call this so you don't have to care. """
+    try:
+        return to_unicode(e.value)
+    except:
+        pass
+
+    try:
+        return unicode(e)
+    except:
+        pass
+
+    try:
+        return str(e)
+    except:
+        pass
+    return "<exception failed to convert to text>"
+
+
 class YumUtilBase(YumBaseCli):
     def __init__(self,name,ver,usage):
         YumBaseCli.__init__(self)
@@ -132,6 +162,46 @@ class YumUtilBase(YumBaseCli):
         suppress_keyboard_interrupt_message()
         logger = logging.getLogger("yum.util")
         verbose_logger = logging.getLogger("yum.verbose.util")
+        # Add yum-utils version to history records.
+        if hasattr(self, 'run_with_package_names'):
+            self.run_with_package_names.add("yum-utils")
+
+    def exUserCancel(self):
+        self.logger.critical(_('\n\nExiting on user cancel'))
+        if self.unlock(): return 200
+        return 1
+
+    def exIOError(self, e):
+        if e.errno == 32:
+            self.logger.critical(_('\n\nExiting on Broken Pipe'))
+        else:
+            self.logger.critical(_('\n\n%s') % exception2msg(e))
+        if self.unlock(): return 200
+        return 1
+
+    def exPluginExit(self, e):
+        '''Called when a plugin raises PluginYumExit.
+
+        Log the plugin's exit message if one was supplied.
+        ''' # ' xemacs hack
+        exitmsg = exception2msg(e)
+        if exitmsg:
+            self.logger.warn('\n\n%s', exitmsg)
+        if self.unlock(): return 200
+        return 1
+
+    def exFatal(self, e):
+        self.logger.critical('\n\n%s', exception2msg(e))
+        if self.unlock(): return 200
+        return 1
+        
+    def unlock(self):
+        try:
+            self.closeRpmDB()
+            self.doUnlock()
+        except Errors.LockError, e:
+            return 200
+        return 0
         
         
     def getOptionParser(self):
@@ -147,12 +217,15 @@ class YumUtilBase(YumBaseCli):
             try:
                 self.doLock()
             except Errors.LockError, e:
-                if "%s" %(e.msg,) != lockerr:
-                    lockerr = "%s" %(e.msg,)
+                if exception2msg(e) != lockerr:
+                    lockerr = exception2msg(e)
                     self.logger.critical(lockerr)
-                self.logger.critical("Another app is currently holding the yum lock; waiting for it to exit...")  
-                show_lock_owner(e.pid, self.logger)
-                time.sleep(2)
+                if not self.conf.exit_on_lock:
+                    self.logger.critical("Another app is currently holding the yum lock; waiting for it to exit...")  
+                    show_lock_owner(e.pid, self.logger)
+                    time.sleep(2)
+                else:
+                    raise Errors.YumBaseError, _("Another app is currently holding the yum lock; exiting as configured by exit_on_lock")
             else:
                 break
         
@@ -162,6 +235,14 @@ class YumUtilBase(YumBaseCli):
     def doUtilConfigSetup(self,args = sys.argv[1:],pluginsTypes=(plugins.TYPE_CORE,)):
         # Parse only command line options that affect basic yum setup
         opts = self._parser.firstParse(args)
+
+        # go through all the setopts and set the global ones
+        self._parseSetOpts(opts.setopts)
+
+        if self.main_setopts:
+            for opt in self.main_setopts.items:
+                setattr(opts, opt, getattr(self.main_setopts, opt))
+
         # Just print out the version if that's what the user wanted
         if opts.version:
             self._printUtilVersion()
@@ -187,19 +268,26 @@ class YumUtilBase(YumBaseCli):
                 pc.disabled_plugins =self._parser._splitArg(opts.disableplugins)
             if hasattr(opts, "enableplugins"):
                 pc.enabled_plugins = self._parser._splitArg(opts.enableplugins)
+            if hasattr(opts, "releasever"):
+                pc.releasever = opts.releasever
             self.conf
 
+            # now set  all the non-first-start opts from main from our setopts
+            if self.main_setopts:
+                for opt in self.main_setopts.items:
+                    setattr(self.conf, opt, getattr(self.main_setopts, opt))
+
         except Errors.ConfigError, e:
-            self.logger.critical(_('Config Error: %s'), e)
+            self.logger.critical(_('Config Error: %s'), exception2msg(e))
             sys.exit(1)
         except ValueError, e:
-            self.logger.critical(_('Options Error: %s'), e)
+            self.logger.critical(_('Options Error: %s'), exception2msg(e))
             sys.exit(1)
         except plugins.PluginYumExit, e:
-            self.logger.critical(_('PluginExit Error: %s'), e)
+            self.logger.critical(_('PluginExit Error: %s'), exception2msg(e))
             sys.exit(1)
         except Errors.YumBaseError, e:
-            self.logger.critical(_('Yum Error: %s'), e)
+            self.logger.critical(_('Yum Error: %s'), exception2msg(e))
             sys.exit(1)
             
         # update usage in case plugins have added commands
@@ -227,60 +315,66 @@ class YumUtilBase(YumBaseCli):
             self._getRepos(doSetup = True)
             self._getSacks()
         except Errors.YumBaseError, msg:
-            self.logger.critical(str(msg))
+            self.logger.critical(exception2msg(msg))
             sys.exit(1)
-    
-    def doUtilTransaction(self):
-        def exUserCancel():
-            self.logger.critical(_('\n\nExiting on user cancel'))
-            if unlock(): return 200
-            return 1
 
-        def exIOError(e):
-            if e.errno == 32:
-                self.logger.critical(_('\n\nExiting on Broken Pipe'))
-            else:
-                self.logger.critical(_('\n\n%s') % str(e))
-            if unlock(): return 200
-            return 1
-
-        def exPluginExit(e):
-            '''Called when a plugin raises PluginYumExit.
-
-            Log the plugin's exit message if one was supplied.
-            ''' # ' xemacs hack
-            exitmsg = str(e)
-            if exitmsg:
-                self.logger.warn('\n\n%s', exitmsg)
-            if unlock(): return 200
-            return 1
-
-        def exFatal(e):
-            self.logger.critical('\n\n%s', to_unicode(e.value))
-            if unlock(): return 200
-            return 1
-
-        def unlock():
-            try:
-                self.closeRpmDB()
-                self.doUnlock()
-            except Errors.LockError, e:
-                return 200
+    def doUtilBuildTransaction(self, unfinished_transactions_check=True):
+        try:
+            (result, resultmsgs) = self.buildTransaction(unfinished_transactions_check = unfinished_transactions_check)
+        except plugins.PluginYumExit, e:
+            return self.exPluginExit(e)
+        except Errors.YumBaseError, e:
+            result = 1
+            resultmsgs = [exception2msg(e)]
+        except KeyboardInterrupt:
+            return self.exUserCancel()
+        except IOError, e:
+            return self.exIOError(e)
+       
+        # Act on the depsolve result
+        if result == 0:
+            # Normal exit
+            if self.unlock(): return 200
             return 0
+        elif result == 1:
+            # Fatal error
+            for msg in resultmsgs:
+                prefix = _('Error: %s')
+                prefix2nd = (' ' * (utf8_width(prefix) - 2))
+                self.logger.critical(prefix, msg.replace('\n', '\n' + prefix2nd))
+            if not self.conf.skip_broken:
+                self.verbose_logger.info(_(" You could try using --skip-broken to work around the problem"))
+            if not self._rpmdb_warn_checks(out=self.verbose_logger.info, warn=False):
+                self.verbose_logger.info(_(" You could try running: rpm -Va --nofiles --nodigest"))
+            if self.unlock(): return 200
+            return 1
+        elif result == 2:
+            # Continue on
+            pass
+        else:
+            self.logger.critical(_('Unknown Error(s): Exit Code: %d:'), result)
+            for msg in resultmsgs:
+                self.logger.critical(msg)
+            if self.unlock(): return 200
+            return 3
+
+        self.verbose_logger.log(logginglevels.INFO_2, _('\nDependencies Resolved'))
+        
+    def doUtilTransaction(self):
 
         try:
             return_code = self.doTransaction()
         except plugins.PluginYumExit, e:
-            return exPluginExit(e)
+            return self.exPluginExit(e)
         except Errors.YumBaseError, e:
-            return exFatal(e)
+            return self.exFatal(e)
         except KeyboardInterrupt:
-            return exUserCancel()
+            return self.exUserCancel()
         except IOError, e:
-            return exIOError(e)
+            return self.exIOError(e,)
 
         self.verbose_logger.log(logginglevels.INFO_2, _('Complete!'))
-        if unlock(): return 200
+        if self.unlock(): return 200
         return return_code
         
 def main():

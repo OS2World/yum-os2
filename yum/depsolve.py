@@ -27,6 +27,7 @@ import rpmUtils.miscutils
 from rpmUtils.arch import archDifference, canCoinstall
 import misc
 from misc import unique, version_tuple_to_string
+from transactioninfo import TransactionMember
 import rpm
 
 from packageSack import ListPackageSack
@@ -37,7 +38,7 @@ import Errors
 import warnings
 warnings.simplefilter("ignore", Errors.YumFutureDeprecationWarning)
 
-from yum import _
+from yum import _, _rpm_ver_atleast
 
 try:
     assert max(2, 4) == 4
@@ -65,10 +66,11 @@ class Depsolve(object):
     """
 
     def __init__(self):
-        packages.base = self
         self._ts = None
         self._tsInfo = None
         self.dsCallback = None
+        # Callback-style switch, default to legacy (hdr, file) mode
+        self.use_txmbr_in_callback = False
         self.logger = logging.getLogger("yum.Depsolve")
         self.verbose_logger = logging.getLogger("yum.verbose.Depsolve")
 
@@ -138,6 +140,9 @@ class Depsolve(object):
                             'test': rpm.RPMTRANS_FLAG_TEST,
                             'justdb': rpm.RPMTRANS_FLAG_JUSTDB,
                             'repackage': rpm.RPMTRANS_FLAG_REPACKAGE}
+        # This is only in newer rpm.org releases
+        if hasattr(rpm, 'RPMTRANS_FLAG_NOCONTEXTS'):
+            ts_flags_to_rpm['nocontexts'] = rpm.RPMTRANS_FLAG_NOCONTEXTS
         
         self._ts.setFlags(0) # reset everything.
         
@@ -217,18 +222,29 @@ class Depsolve(object):
                         txmbr.ts_state = 'i'
                         txmbr.output_state = TS_INSTALL
 
+                # New-style callback with just txmbr instead of full headers?
+                if self.use_txmbr_in_callback:
+                    cbkey = txmbr
+                else:
+                    cbkey = (hdr, rpmfile)
                 
-                self.ts.addInstall(hdr, (hdr, rpmfile), txmbr.ts_state)
+                self.ts.addInstall(hdr, cbkey, txmbr.ts_state)
                 self.verbose_logger.log(logginglevels.DEBUG_1,
                     _('Adding Package %s in mode %s'), txmbr.po, txmbr.ts_state)
-                if self.dsCallback: 
-                    self.dsCallback.pkgAdded(txmbr.pkgtup, txmbr.ts_state)
+                if self.dsCallback:
+                    dscb_ts_state = txmbr.ts_state
+                    if dscb_ts_state == 'u' and txmbr.downgrades:
+                        dscb_ts_state = 'd'
+                    self.dsCallback.pkgAdded(txmbr.pkgtup, dscb_ts_state)
             
             elif txmbr.ts_state in ['e']:
                 if (txmbr.pkgtup, txmbr.ts_state) in ts_elem:
                     continue
                 self.ts.addErase(txmbr.po.idx)
-                if self.dsCallback: self.dsCallback.pkgAdded(txmbr.pkgtup, 'e')
+                if self.dsCallback:
+                    if txmbr.downgraded_by:
+                        continue
+                    self.dsCallback.pkgAdded(txmbr.pkgtup, 'e')
                 self.verbose_logger.log(logginglevels.DEBUG_1,
                     _('Removing Package %s'), txmbr.po)
 
@@ -334,6 +350,7 @@ class Depsolve(object):
             providers = self.rpmdb.getProvides(needname, needflags, needversion)
 
         for inst_po in providers:
+            self._working_po = inst_po # store the last provider
             inst_str = '%s.%s %s:%s-%s' % inst_po.pkgtup
             (i_n, i_a, i_e, i_v, i_r) = inst_po.pkgtup
             self.verbose_logger.log(logginglevels.DEBUG_2,
@@ -367,19 +384,47 @@ class Depsolve(object):
         self.verbose_logger.log(logginglevels.DEBUG_2, _('Mode for pkg providing %s: %s'), 
             niceformatneed, needmode)
 
+        if needmode in ['ud']: # the thing it needs is being updated or obsoleted away 
+            # try to update the requiring package in hopes that all this problem goes away :(
+            self.verbose_logger.log(logginglevels.DEBUG_2, _('Trying to update %s to resolve dep'), requiringPo)
+            # if the required pkg was updated, not obsoleted, then try to
+            # only update the requiring po
+            origobs = self.conf.obsoletes
+            self.conf.obsoletes = 0
+            txmbrs = self.update(po=requiringPo, requiringPo=requiringPo)
+            self.conf.obsoletes = origobs
+            if not txmbrs:
+                txmbrs = self.update(po=requiringPo, requiringPo=requiringPo)
+                if not txmbrs:
+                    msg = self._err_missing_requires(requiringPo, requirement)
+                    self.verbose_logger.log(logginglevels.DEBUG_2, _('No update paths found for %s. Failure!'), requiringPo)
+                    return self._requiringFromTransaction(requiringPo, requirement, errorlist)
+            checkdeps = 1
+
+        if needmode in ['od']: # the thing it needs is being updated or obsoleted away 
+            # try to update the requiring package in hopes that all this problem goes away :(
+            self.verbose_logger.log(logginglevels.DEBUG_2, _('Trying to update %s to resolve dep'), requiringPo)
+            txmbrs = self.update(po=requiringPo, requiringPo=requiringPo)
+            if not txmbrs:
+                msg = self._err_missing_requires(requiringPo, requirement)
+                self.verbose_logger.log(logginglevels.DEBUG_2, _('No update paths found for %s. Failure!'), requiringPo)
+                return self._requiringFromTransaction(requiringPo, requirement, errorlist)
+            checkdeps = 1
+
+            
         if needmode in ['e']:
             self.verbose_logger.log(logginglevels.DEBUG_2, _('TSINFO: %s package requiring %s marked as erase'),
                 requiringPo, needname)
-            txmbr = self.tsInfo.addErase(requiringPo)
-            txmbr.setAsDep(po=inst_po)
+            txmbrs = self.remove(po=requiringPo)
+            for txmbr in txmbrs:
+                txmbr.setAsDep(po=inst_po)
             checkdeps = 1
         
         if needmode in ['i', 'u']:
-            length = len(self.tsInfo)
-            self.update(name=name, epoch=epoch, version=ver, release=rel,
-                        requiringPo=requiringPo)
+            newupdates = self.update(name=name, epoch=epoch, version=ver, release=rel,
+                                     requiringPo=requiringPo)
             txmbrs = self.tsInfo.getMembersWithState(requiringPo.pkgtup, TS_REMOVE_STATES)
-            if len(self.tsInfo) != length and txmbrs:
+            if newupdates and txmbrs:
                 if txmbrs[0].output_state == TS_OBSOLETED:
                     self.verbose_logger.log(logginglevels.DEBUG_2, _('TSINFO: Obsoleting %s with %s to resolve dep.'),
                                             requiringPo, txmbrs[0].obsoleted_by[0])
@@ -511,18 +556,26 @@ class Depsolve(object):
             if pkgmode in ['i', 'u']:
                 self.verbose_logger.log(logginglevels.DEBUG_2,
                     _('%s already in ts, skipping this one'), pkg)
-                # FIXME: Remove this line, if it is not needed ?
-                # checkdeps = 1
                 self._last_req = pkg
                 return checkdeps, missingdep
 
         # find the best one 
 
         # try updating the already install pkgs
+        results = []
         for pkg in provSack.returnNewestByName():
-            results = self.update(requiringPo=requiringPo, name=pkg.name,
-                                  epoch=pkg.epoch, version=pkg.version,
-                                  rel=pkg.rel)
+            tresults = self.update(requiringPo=requiringPo, name=pkg.name,
+                                   epoch=pkg.epoch, version=pkg.version,
+                                   rel=pkg.rel)
+            #  Note that this does "interesting" things with multilib. We can
+            # have say A.i686 and A.x86_64, and if we hit "A.i686" first,
+            # .update() will actually update "A.x86_64" which will then fail
+            # the pkg == txmbr.po test below, but then they'll be nothing to
+            # update when we get around to A.x86_64 ... so this entire loop
+            # fails.
+            #  Keeping results through the loop and thus. testing each pkg
+            # against all txmbr's from previous runs "fixes" this.
+            results.extend(tresults)
             for txmbr in results:
                 if pkg == txmbr.po:
                     checkdeps = True
@@ -547,7 +600,6 @@ class Depsolve(object):
             return checkdeps, missingdep
         
                 
-            
         # FIXME - why can't we look up in the transaction set for the requiringPkg
         # and know what needs it that way and provide a more sensible dep structure in the txmbr
         inst = self.rpmdb.searchNevra(name=best.name, arch=best.arch)
@@ -558,23 +610,30 @@ class Depsolve(object):
             txmbr = self.tsInfo.addUpdate(best, inst[0])
             txmbr.setAsDep(po=requiringPo)
             txmbr.reason = "dep"
+            checkdeps = True
             self._last_req = best
         else:
             self.verbose_logger.debug(_('TSINFO: Marking %s as install for %s'), best,
                 requiringPo)
-            # FIXME: Don't we want .install() here, so obsoletes get done?
-            txmbr = self.tsInfo.addInstall(best)
-            txmbr.setAsDep(po=requiringPo)
-            txmbr.reason = "dep"
-            self._last_req = best
+            reqtuple = misc.string_to_prco_tuple(needname + str(needflags) + needversion)
+            txmbrs = self.install(best, provides_for=reqtuple)
+            for txmbr in txmbrs:
+                txmbr.setAsDep(po=requiringPo)
+                txmbr.reason = "dep"
+                self._last_req = txmbr.po
 
-            # if we had other packages with this name.arch that we found
-            # before, they're not going to be installed anymore, so we
-            # should mark them to be re-checked
-            if best.pkgtup in upgraded:
-                map(self.tsInfo.remove, upgraded[best.pkgtup])
-
-        checkdeps = 1
+                # if we had other packages with this name.arch that we found
+                # before, they're not going to be installed anymore, so we
+                # should mark them to be re-checked
+                if txmbr.pkgtup in upgraded:
+                    map(self.tsInfo.remove, upgraded[txmbr.pkgtup])
+            if not txmbrs:
+                missingdep = 1
+                checkdeps = 0
+                msg = self._err_missing_requires(requiringPo, requirement)
+                errorlist.append(msg)
+            else:
+                checkdeps = 1
         
         return checkdeps, missingdep
 
@@ -622,11 +681,12 @@ class Depsolve(object):
         if len(self.tsInfo) != length and txmbrs:
             return CheckDeps, errormsgs
 
-        msg = '%s conflicts with %s' % (name, conflicting_po.name)
+        msg = '%s conflicts with %s' % (name, str(conflicting_po))
         errormsgs.append(msg)
         self.verbose_logger.log(logginglevels.DEBUG_1, msg)
         CheckDeps = False
-        self.po_with_problems.add((po,None,errormsgs[-1]))
+        # report the conflicting po, so skip-broken can remove it
+        self.po_with_problems.add((po,conflicting_po,errormsgs[-1]))
         return CheckDeps, errormsgs
 
     def _undoDepInstalls(self):
@@ -661,7 +721,7 @@ class Depsolve(object):
         p.print_stats(20)
         return rc
 
-    def resolveDeps(self, full_check=True):
+    def resolveDeps(self, full_check=True, skipping_broken=False):
 
         if not len(self.tsInfo):
             return (0, [_('Success - empty transaction')])
@@ -694,6 +754,7 @@ class Depsolve(object):
 
 
             # check global FileRequires
+            self._working_po = None # reset the working po
             if CheckRemoves:
                 CheckRemoves = False
                 for po, dep in self._checkFileRequires():
@@ -707,6 +768,7 @@ class Depsolve(object):
                     continue
 
             # check Conflicts
+            self._working_po = None # reset the working po
             if CheckInstalls:
                 CheckInstalls = False
                 for conflict in self._checkConflicts():
@@ -733,7 +795,11 @@ class Depsolve(object):
                 txmbr.ts_state = 'i'
                 txmbr.output_state = TS_INSTALL
 
-        if self.dsCallback: self.dsCallback.end()
+        if self.dsCallback:
+            if not self.conf.skip_broken:
+                self.dsCallback.end()
+            elif not skipping_broken and not errors:
+                self.dsCallback.end()
         self.verbose_logger.log(logginglevels.DEBUG_1, _('Dependency Process ending'))
 
         self.tsInfo.changed = False
@@ -748,15 +814,15 @@ class Depsolve(object):
                     continue
                 done.add((po, err))
                 self.verbose_logger.log(logginglevels.DEBUG_4,
-                    _("%s from %s has depsolving problems") % (po, po.repoid))
+                    "SKIPBROKEN: %s from %s has depsolving problems" % (po, po.repoid))
                 err = err.replace('\n', '\n  --> ')
-                self.verbose_logger.log(logginglevels.DEBUG_4,"  --> %s" % err)
+                self.verbose_logger.log(logginglevels.DEBUG_4,"SKIPBROKEN:  --> %s" % err)
             return (1, errors)
 
-        if len(self.tsInfo) > 0:
-            if not len(self.tsInfo):
-                return (0, [_('Success - empty transaction')])
-            return (2, [_('Success - deps resolved')])
+        if not len(self.tsInfo):
+            return (0, [_('Success - empty transaction')])
+        
+        return (2, [_('Success - deps resolved')])
 
     def _resolveRequires(self, errors):
         any_missing = False
@@ -768,7 +834,17 @@ class Depsolve(object):
         for txmbr in self.tsInfo.getUnresolvedMembers():
 
             if self.dsCallback and txmbr.ts_state:
-                self.dsCallback.pkgAdded(txmbr.pkgtup, txmbr.ts_state)
+                dscb_ts_state = txmbr.ts_state
+                if txmbr.downgrades:
+                    dscb_ts_state = 'd'
+                if dscb_ts_state == 'u' and txmbr.reinstall:
+                    dscb_ts_state = 'r'
+                if dscb_ts_state == 'u':
+                    if txmbr.output_state == TS_OBSOLETING:
+                        dscb_ts_state = 'o'
+                    elif not txmbr.updates:
+                        dscb_ts_state = 'i'
+                self.dsCallback.pkgAdded(txmbr.pkgtup, dscb_ts_state)
             self.verbose_logger.log(logginglevels.DEBUG_2,
                                     _("Checking deps for %s") %(txmbr,))
 
@@ -790,6 +866,14 @@ class Depsolve(object):
 
             missing_in_pkg = False
             for po, dep in thisneeds:
+                if txmbr.downgraded_by: # Don't try to chain remove downgrades
+                    msg = self._err_missing_requires(po, dep)
+                    self.verbose_logger.log(logginglevels.DEBUG_2, msg)
+                    errors.append(msg)
+                    self.po_with_problems.add((po,self._working_po,errors[-1]))
+                    missing_in_pkg = 1
+                    continue
+
                 (checkdep, missing, errormsgs) = self._processReq(po, dep)
                 CheckDeps |= checkdep
                 errors += errormsgs
@@ -845,12 +929,16 @@ class Depsolve(object):
         for req in sorted(txmbr_reqs, key=self._sort_req_key):
             if req[0].startswith('rpmlib('):
                 continue
-            if req in oldreqs and self.rpmdb.getProvides(*req):
+            if req in oldreqs:
                 continue
             
             self.verbose_logger.log(logginglevels.DEBUG_2, _("looking for %s as a requirement of %s"), req, txmbr)
             provs = self.tsInfo.getProvides(*req)
-            if not provs:
+            #  The self provides should mostly be caught before here now, but
+            # at least config() crack still turns up, it's not that
+            # expensive to just do it, and we really don't want "false positive"
+            # requires for compare_providers().
+            if not provs and not txmbr.po.inPrcoRange('provides', req):
                 ret.append( (txmbr.po, self._prco_req2req(req)) )
                 continue
 
@@ -881,11 +969,22 @@ class Depsolve(object):
         for prov in provs:
             if prov[0].startswith('rpmlib('): # ignore rpmlib() provides
                 continue
-            if newpoprovs.has_key(prov):
+            if prov in newpoprovs:
                 continue
             # FIXME: This is probably the best place to fix the postfix rename
             # problem long term (post .21) ... see compare_providers.
             for pkg, hits in self.tsInfo.getRequires(*prov).iteritems():
+                # See the docs, this is to make groupremove "more useful".
+                if (self.conf.groupremove_leaf_only and txmbr.groups and
+                    txmbr.output_state == TS_ERASE):
+                    cb = self.dsCallback
+                    if cb and hasattr(cb, 'groupRemoveReq'):
+                        cb.groupRemoveReq(pkg, hits)
+                    #  We don't undo anything else here ... hopefully that's
+                    # fine.
+                    self.tsInfo.remove(txmbr.pkgtup)
+                    return []
+
                 for hit in hits:
                     # See if the update solves the problem...
                     found = False
@@ -1019,8 +1118,11 @@ class Depsolve(object):
         for po in self.rpmdb.returnConflictPackages():
             if self.tsInfo.getMembersWithState(po.pkgtup, output_states=TS_REMOVE_STATES):
                 continue
+            conflicts = po.returnPrco('conflicts')
+            if not conflicts: # We broke this due to dbMatch() usage.
+                continue
             cpkgs.append(po)
-            for conflict in po.returnPrco('conflicts'):
+            for conflict in conflicts:
                 (r, f, v) = conflict
                 for conflicting_po in self.tsInfo.getNewProvides(r, f, v):
                     if conflicting_po.pkgtup[0] == po.pkgtup[0] and conflicting_po.pkgtup[2:] == po.pkgtup[2:]:
@@ -1040,6 +1142,10 @@ class Depsolve(object):
                         continue
                     ret.append( (po, self._prco_req_nfv2req(r, f, v),
                                  conflicting_po) )
+
+        if _rpm_ver_atleast((4, 9, 0)):
+            return ret # Don't need the conflicts cache anymore
+
         self.rpmdb.transactionCacheConflictPackages(cpkgs)
         return ret
 
@@ -1116,11 +1222,15 @@ class Depsolve(object):
         pkgs = unique_nevra_pkgs.values()
             
         pkgresults = {}
-        ipkgresults = {}
 
         for pkg in pkgs:
             pkgresults[pkg] = 0
-
+        
+        # hand this off to our plugins
+        self.plugins.run("compare_providers", providers_dict=pkgresults, 
+                                      reqpo=reqpo)
+        
+        for pkg in pkgresults.keys():
             rpmdbpkgs = self.rpmdb.searchNevra(name=pkg.name)
             if rpmdbpkgs:
                 #  We only want to count things as "installed" if they are
@@ -1134,23 +1244,21 @@ class Depsolve(object):
                     # we are giving an edge to is not obsoleted by
                     # something else in the transaction. :(
                     # there are many ways I hate this - this is but one
-                    ipkgresults[pkg] = 5
+                    pkgresults[pkg] += 5
+                elif newest.verEQ(pkg):
+                    #  We get here from bestPackagesFromList(), give a giant
+                    # bump to stuff that is already installed.
+                    pkgresults[pkg] += 1000
+                elif newest.verGT(pkg):
+                    # if the version we're looking at is older than what we have installed
+                    # score it down like we would an obsoleted pkg
+                    pkgresults[pkg] -= 1024
             else:
                 # just b/c they're not installed pkgs doesn't mean they should
                 # be ignored entirely. Just not preferred
-                ipkgresults[pkg] = 0
+                pass
 
-        #  This is probably only for "renames". What happens is that pkgA-1 gets
-        # obsoleted by pkgB but pkgB requires pkgA-2, now _if_ the pkgA txmbr
-        # gets processed before pkgB then we'll process the "checkRemove" of
-        # pkgA ... so any deps. on pkgA-1 will look for a new provider, one of
-        # which is pkgA-2 in that case we want to choose that pkg over any
-        # others. This works for multiple cases too, but who'd do that right?:)
-        #  FIXME: A good long term. fix here is to just not get into this
-        # problem, but that's too much for .21. This is much safer.
-        if ipkgresults:
-            pkgresults = ipkgresults
-            pkgs = ipkgresults.keys()
+        pkgs = pkgresults.keys()
             
         # go through each pkg and compare to others
         # if it is same skip it
@@ -1186,8 +1294,7 @@ class Depsolve(object):
                     pkgresults[po] -= 1024
 
                 obsoleted = False
-                poprovtup = (po.name, 'EQ', (po.epoch, po.ver, po.release))
-                if nextpo.inPrcoRange('obsoletes', poprovtup):
+                if po.obsoletedBy([nextpo]):
                     obsoleted = True
                     pkgresults[po] -= 1024
                                 
@@ -1209,6 +1316,7 @@ class Depsolve(object):
                     if res == po:
                         pkgresults[po] += 5
 
+            # End of O(N*N): for nextpo in pkgs:
             if _common_sourcerpm(po, reqpo):
                 self.verbose_logger.log(logginglevels.DEBUG_4,
                     _('common sourcerpm %s and %s' % (po, reqpo)))
@@ -1216,7 +1324,7 @@ class Depsolve(object):
             if self.isPackageInstalled(po.base_package_name):
                 self.verbose_logger.log(logginglevels.DEBUG_4,
                     _('base package %s is installed for %s' % (po.base_package_name, po)))
-                pkgresults[po] += 5 # Same as ipkgresults above.
+                pkgresults[po] += 5 # Same as before - - but off of base package name
             if reqpo:
                 cpl = _common_prefix_len(po.name, reqpo.name)
                 if cpl > 2:
@@ -1225,6 +1333,53 @@ class Depsolve(object):
                 
                     pkgresults[po] += cpl*2
                 
+        #  If we have more than one "best", see what would happen if we picked
+        # each package ... ie. what things do they require that _aren't_ already
+        # installed/to-be-installed. In theory this can screw up due to:
+        #   pkgA => requires pkgX
+        #   pkgB => requires pkgY, requires pkgZ
+        # ...but pkgX requires 666 other things. Going recursive is
+        # "non-trivial" though, python != prolog. This seems to do "better"
+        # from simple testing though.
+        bestnum = max(pkgresults.values())
+        rec_depsolve = {}
+        for po in pkgs:
+            if pkgresults[po] != bestnum:
+                continue
+            rec_depsolve[po] = 0
+        if len(rec_depsolve) > 1:
+            for po in rec_depsolve:
+                fake_txmbr = TransactionMember(po)
+
+                #  Note that this is just requirements, so you could also have
+                # 4 requires for a single package. This might be fixable, if
+                # needed, but given the above it's probably better to leave it
+                # like this.
+                reqs = self._checkInstall(fake_txmbr)
+                rec_depsolve[po] = len(reqs)
+
+            bestnum = min(rec_depsolve.values())
+            self.verbose_logger.log(logginglevels.DEBUG_4,
+                                    _('requires minimal: %d') % bestnum)
+            for po in rec_depsolve:
+                if rec_depsolve[po] == bestnum:
+                    self.verbose_logger.log(logginglevels.DEBUG_4,
+                            _(' Winner: %s') % po)
+                    pkgresults[po] += 1
+                else:
+                    num = rec_depsolve[po]
+                    self.verbose_logger.log(logginglevels.DEBUG_4,
+                            _(' Loser(with %d): %s') % (num, po))
+
+        #  We don't want to decide to use a "shortest first", if something else
+        # has told us to pick something else. But we want to pick between
+        # multiple "best" packages. So we spike all the best packages (so
+        # only those can win) and then bump them down by package name length.
+        bestnum = max(pkgresults.values())
+        for po in pkgs:
+            if pkgresults[po] != bestnum:
+                continue
+            pkgresults[po] += 1000
             pkgresults[po] += (len(po.name)*-1)
 
         bestorder = sorted(pkgresults.items(),

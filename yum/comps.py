@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -16,11 +17,6 @@
 import types
 import sys
 from constants import *
-try:
-    from xml.etree import cElementTree
-except ImportError:
-    import cElementTree
-iterparse = cElementTree.iterparse
 from Errors import CompsException
 #FIXME - compsexception isn't caught ANYWHERE so it's pointless to raise it
 # switch all compsexceptions to grouperrors after api break
@@ -28,14 +24,12 @@ import fnmatch
 import re
 from yum.i18n import to_unicode
 from misc import get_my_lang_code
+from yum.misc import cElementTree_iterparse as iterparse 
 
 lang_attr = '{http://www.w3.org/XML/1998/namespace}lang'
 
 def parse_boolean(strng):
-    if BOOLEAN_STATES.has_key(strng.lower()):
-        return BOOLEAN_STATES[strng.lower()]
-    else:
-        return False
+    return BOOLEAN_STATES.get(strng.lower(), False)
 
 def parse_number(strng):
     return int(strng)
@@ -235,11 +229,11 @@ class Group(CompsObj):
             
         # name and description translations
         for lang in obj.translated_name:
-            if not self.translated_name.has_key(lang):
+            if lang not in self.translated_name:
                 self.translated_name[lang] = obj.translated_name[lang]
         
         for lang in obj.translated_description:
-            if not self.translated_description.has_key(lang):
+            if lang not in self.translated_description:
                 self.translated_description[lang] = obj.translated_description[lang]
         
     def xml(self):
@@ -348,11 +342,11 @@ class Category(CompsObj):
         
         # name and description translations
         for lang in obj.translated_name:
-            if not self.translated_name.has_key(lang):
+            if lang not in self.translated_name:
                 self.translated_name[lang] = obj.translated_name[lang]
         
         for lang in obj.translated_description:
-            if not self.translated_description.has_key(lang):
+            if lang not in self.translated_description:
                 self.translated_description[lang] = obj.translated_description[lang]
 
     def xml(self):
@@ -424,7 +418,7 @@ class Comps(object):
 
         for item in group_pattern.split(','):
             item = item.strip()
-            if self._groups.has_key(item):
+            if item in self._groups:
                 thisgroup = self._groups[item]
                 returns[thisgroup.groupid] = thisgroup
                 continue
@@ -490,14 +484,14 @@ class Comps(object):
         return returns.values()
 
     def add_group(self, group):
-        if self._groups.has_key(group.groupid):
+        if group.groupid in self._groups:
             thatgroup = self._groups[group.groupid]
             thatgroup.add(group)
         else:
             self._groups[group.groupid] = group
 
     def add_category(self, category):
-        if self._categories.has_key(category.categoryid):
+        if category.categoryid in self._categories:
             thatcat = self._categories[category.categoryid]
             thatcat.add(category)
         else:
@@ -509,7 +503,10 @@ class Comps(object):
             
         if type(srcfile) in types.StringTypes:
             # srcfile is a filename string
-            infile = open(srcfile, 'rt')
+            try:
+                infile = open(srcfile, 'rt')
+            except IOError, e:
+                raise CompsException, 'open(%s): #%u %s' % (srcfile, e.errno, e.strerror)
         else:
             # srcfile is a file object
             infile = srcfile
@@ -557,7 +554,7 @@ class Comps(object):
                 check_pkgs = group.optional_packages.keys() + group.default_packages.keys() + group.conditional_packages.keys()
                 group.installed = False
                 for pkgname in check_pkgs:
-                    if inst_pkg_names.has_key(pkgname):
+                    if pkgname in inst_pkg_names:
                         group.installed = True
                         break
         

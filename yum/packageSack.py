@@ -24,6 +24,8 @@ import re
 import fnmatch
 import misc
 from packages import parsePackages
+import rpmUtils.miscutils
+from rpmUtils.miscutils import compareEVR
 
 class PackageSackVersion:
     def __init__(self):
@@ -98,7 +100,7 @@ class PackageSackBase(object):
         """return list of pkgobjects matching the nevra requested"""
         raise NotImplementedError()
 
-    def searchNames(self, names=[]):
+    def searchNames(self, names=[], return_pkgtups=False):
         raise NotImplementedError()
 
     def searchPO(self, po):
@@ -150,6 +152,11 @@ class PackageSackBase(object):
 
     def returnObsoletes(self, newest=False):
         """returns a dict of obsoletes dict[obsoleting pkgtuple] = [list of obs]"""
+        raise NotImplementedError()
+
+    def have_fastReturnFileEntries(self):
+        """ Is calling pkg.returnFileEntries(primary_only=True) faster than
+            using searchFiles(). """
         raise NotImplementedError()
 
     def searchFiles(self, name):
@@ -227,15 +234,15 @@ class PackageSackBase(object):
         """return list of newest packages based on name, arch matching
            this means(in name.arch form): foo.i386 and foo.noarch are not
            compared to each other for highest version only foo.i386 and
-           foo.i386 will be compared"""
+           foo.i386 will be compared
+           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
+           The last _two_ pkgs will be returned, not just one of them. """
         raise NotImplementedError()
 
     def returnNewestByName(self, name=None, patterns=None, ignore_case=False):
         """return list of newest packages based on name matching
            this means(in name.arch form): foo.i386 and foo.noarch will
-           be compared to each other for highest version.
-           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
-           The last _two_ pkgs will be returned, not just one of them. """
+           be compared to each other for highest version."""
         raise NotImplementedError()
 
     def simplePkgList(self, patterns=None, ignore_case=False):
@@ -343,7 +350,7 @@ class PackageSackBase(object):
         for po in self.returnPackages(repoid=repoid):
             preq = 0
             for p in _return_all_provides(po):
-                if req.has_key(p):
+                if p in req:
                     #  If this pkg provides something that is required by
                     # anything but itself (or another version of itself) it
                     # isn't an orphan.
@@ -400,8 +407,8 @@ class MetaSack(PackageSackBase):
         """return list of pkgobjects matching the nevra requested"""
         return self._computeAggregateListResult("searchNevra", name, epoch, ver, rel, arch)
 
-    def searchNames(self, names=[]):
-        return self._computeAggregateListResult("searchNames", names)
+    def searchNames(self, names=[], return_pkgtups=False):
+        return self._computeAggregateListResult("searchNames", names, return_pkgtups)
 
     def getProvides(self, name, flags=None, version=(None, None, None)):
         """return dict { packages -> list of matching provides }"""
@@ -438,13 +445,26 @@ class MetaSack(PackageSackBase):
         nobsdict = {}
         last_name = ''
         last_pkg = None
-        for pkg in reversed(sorted(self.searchNames(names))):
-            if last_name == pkg.name and not pkg.verEQ(last_pkg):
+        #  It takes about 0.2 of a second to convert these into packages, just
+        # so we can sort them, which is ~40% of this functions time. So we sort
+        # the pkgtups "by hand".
+        def _pkgtup_nevr_cmp(x, y):
+            """ Compare two pkgtup's (ignore arch): n, a, e, v, r. """
+            ret = cmp(x[0], y[0])
+            if ret: return ret
+            # This is negated so we get higher versions first, in the list.
+            return -compareEVR((x[2], x[3], x[4]), (y[2], y[3], y[4]))
+        def _pkgtup_nevr_eq(x, y):
+            return _pkgtup_nevr_cmp(x, y) == 0
+        for pkgtup in sorted(self.searchNames(names, return_pkgtups=True),
+                             cmp=_pkgtup_nevr_cmp):
+            name = pkgtup[0]
+            if last_name == name and not _pkgtup_nevr_eq(last_pkgtup, pkgtup):
                 continue
-            last_name = pkg.name
-            last_pkg = pkg
-            if pkg.pkgtup in obsdict:
-                nobsdict[pkg.pkgtup] = obsdict[pkg.pkgtup]
+            last_name = name
+            last_pkgtup = pkgtup
+            if pkgtup in obsdict:
+                nobsdict[pkgtup] = obsdict[pkgtup]
         return nobsdict
         
     def searchFiles(self, name):
@@ -497,7 +517,9 @@ class MetaSack(PackageSackBase):
         """return list of newest packages based on name, arch matching
            this means(in name.arch form): foo.i386 and foo.noarch are not
            compared to each other for highest version only foo.i386 and
-           foo.i386 will be compared"""
+           foo.i386 will be compared.
+           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
+           The last _two_ pkgs will be returned, not just one of them. """
         calr = self._computeAggregateListResult
         pkgs = calr("returnNewestByNameArch", naTup, patterns, ignore_case)
         pkgs = packagesNewestByNameArch(pkgs)
@@ -509,9 +531,7 @@ class MetaSack(PackageSackBase):
     def returnNewestByName(self, name=None, patterns=None, ignore_case=False):
         """return list of newest packages based on name matching
            this means(in name.arch form): foo.i386 and foo.noarch will
-           be compared to each other for highest version.
-           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
-           The last _two_ pkgs will be returned, not just one of them. """
+           be compared to each other for highest version."""
         pkgs = self._computeAggregateListResult("returnNewestByName", name,
                                                 patterns, ignore_case)
         pkgs = packagesNewestByName(pkgs)
@@ -638,7 +658,7 @@ class PackageSack(PackageSackBase):
 
     def dropCachedData(self):
         """ Do nothing, mainly for the testing code. """
-        pass
+        self.clearIndexes()
 
     def setCompatArchs(self, compatarchs):
         self.compatarchs = compatarchs
@@ -666,7 +686,7 @@ class PackageSack(PackageSackBase):
             result.append(po)
         return result
         
-    def searchNames(self, names=[]):
+    def searchNames(self, names=[], return_pkgtups=False):
         """return list of pkgobjects matching the names requested"""
         self._checkIndexes(failure='build')
         result = []
@@ -676,11 +696,17 @@ class PackageSack(PackageSackBase):
                 continue
             done.add(name)
             result.extend(self.nevra.get((name, None, None, None, None), []))
+        if return_pkgtups:
+            return [pkg.pkgtup for pkg in result]
         return result
 
     def getProvides(self, name, flags=None, version=(None, None, None)):
         """return dict { packages -> list of matching provides }"""
         self._checkIndexes(failure='build')
+        if version is None:
+            version = (None, None, None)
+        elif type(version) in (str, type(None), unicode):
+            version = rpmUtils.miscutils.stringToVersion(version)
         result = { }
         for po in self.provides.get(name, []):
             hits = po.matchingPrcos('provides', (name, flags, version))
@@ -695,6 +721,10 @@ class PackageSack(PackageSackBase):
     def getRequires(self, name, flags=None, version=(None, None, None)):
         """return dict { packages -> list of matching requires }"""
         self._checkIndexes(failure='build')
+        if version is None:
+            version = (None, None, None)
+        elif type(version) in (str, type(None), unicode):
+            version = rpmUtils.miscutils.stringToVersion(version)
         result = { }
         for po in self.requires.get(name, []):
             hits = po.matchingPrcos('requires', (name, flags, version))
@@ -772,18 +802,21 @@ class PackageSack(PackageSackBase):
             
         return obs
         
+    def have_fastReturnFileEntries(self):
+        """ Is calling pkg.returnFileEntries(primary_only=True) faster than
+            using searchFiles(). """
+        return True
+
     def searchFiles(self, name):
-        """return list of packages by filename
-           FIXME - need to add regex match against keys in file list
-        """
+        """ Return list of packages by filename. """
         self._checkIndexes(failure='build')
-        if self.filenames.has_key(name):
+        if name in self.filenames:
             return self.filenames[name]
         else:
             return []
 
     def _addToDictAsList(self, dict, key, data):
-        if not dict.has_key(key):
+        if key not in dict:
             dict[key] = []
         #if data not in dict[key]: - if I enable this the whole world grinds to a halt
         # need a faster way of looking for the object in any particular list
@@ -903,7 +936,10 @@ class PackageSack(PackageSackBase):
         """return list of newest packages based on name, arch matching
            this means(in name.arch form): foo.i386 and foo.noarch are not 
            compared to each other for highest version only foo.i386 and 
-           foo.i386 will be compared"""
+           foo.i386 will be compared
+           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
+           The last _two_ pkgs will be returned, not just one of them. """
+
         highdict = {}
         # If naTup is set, only iterate through packages that match that
         # name
@@ -917,7 +953,7 @@ class PackageSack(PackageSackBase):
                                         ignore_case=ignore_case)
 
         for pkg in where:
-            if not highdict.has_key((pkg.name, pkg.arch)):
+            if (pkg.name, pkg.arch) not in highdict:
                 highdict[(pkg.name, pkg.arch)] = pkg
             else:
                 pkg2 = highdict[(pkg.name, pkg.arch)]
@@ -935,16 +971,18 @@ class PackageSack(PackageSackBase):
     def returnNewestByName(self, name=None, patterns=None, ignore_case=False):
         """return list of newest packages based on name matching
            this means(in name.arch form): foo.i386 and foo.noarch will
-           be compared to each other for highest version.
-           Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
-           The last _two_ pkgs will be returned, not just one of them. """
+           be compared to each other for highest version."""
 
         highdict = {}
-        for pkg in self.returnPackages(patterns=patterns,
-                                       ignore_case=ignore_case):
-            if not highdict.has_key(pkg.name):
-                highdict[pkg.name] = []
-                highdict[pkg.name].append(pkg)
+        if patterns is None and name is not None:
+            pkgs = self.searchNevra(name=name)
+        else:
+            pkgs = self.returnPackages(patterns=patterns,
+                                       ignore_case=ignore_case)
+
+        for pkg in pkgs:
+            if pkg.name not in highdict:
+                highdict[pkg.name] = [pkg]
             else:
                 pkg2 = highdict[pkg.name][0]
                 if pkg.verGT(pkg2):
@@ -1002,8 +1040,7 @@ class PackageSack(PackageSackBase):
 
 def packagesNewestByName(pkgs):
     """ Does the same as PackageSack.returnNewestByName().
-        Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64
-        The last _two_ pkgs will be returned, not just one of them. """
+        Note that given: foo-1.i386; foo-2.i386 and foo-3.x86_64"""
     newest = {}
     for pkg in pkgs:
         key = pkg.name
@@ -1021,7 +1058,8 @@ def packagesNewestByName(pkgs):
         ret.extend(vals)
     return ret
 def packagesNewestByNameArch(pkgs):
-    """ Does the same as PackageSack.returnNewestByNameArch() """
+    """ Does the same as PackageSack.returnNewestByNameArch()
+        The last _two_ pkgs will be returned, not just one of them."""
     newest = {}
     for pkg in pkgs:
         key = (pkg.name, pkg.arch)

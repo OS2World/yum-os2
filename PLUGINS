@@ -1,15 +1,15 @@
 == Introduction ==
 Yum has a simple but powerful plugin architecture which allows external modules
- to add new features and/or modify Yum's behaviour. Yum plugins are Python modu
-les (.py files) which are loaded when Yum starts.
+to add new features and/or modify Yum's behaviour. Yum plugins are Python module
+s (.py files) which are loaded when Yum starts.
 
 Plugins were created partially as a place to put functionality that was seen as
- either less common or undesirable for the main yum package.  Functionality in
-plugins will generally not be moved or included in the core yum package.
+either less common or undesirable for the main yum package.  Functionality in pl
+ugins will generally not be moved or included in the core yum package.
 
-This document explains how to create plugins for Yum. See the {{{ yum(8) }}} an
-d {{{ yum.conf(5) }}} man pages for information on how to install and configure
- pre-existing plugins.
+This document explains how to create plugins for Yum. See the {{{ yum(8) }}} and
+ {{{ yum.conf(5) }}} man pages for information on how to install and configure p
+re-existing plugins.
 
 
 == A Basic Plugin ==
@@ -28,21 +28,20 @@ def postreposetup_hook(conduit):
     raise PluginYumExit('Goodbye')
 }}}
 
-This plugin will display "Hello world" as it loads and then will cause Yum to q
-uit with a "Goodbye" message once it has finished initialising its repositories
-.
+This plugin will display "Hello world" as it loads and then will cause Yum to qu
+it with a "Goodbye" message once it has finished initialising its repositories.
 
 == Slots and Hooks ==
 Plugins integrate with Yum by registering a 'hook' function that corresponds to
- a given 'slot'. A slot is simply a point in Yum's execution. All plugin hook f
-unctions for a given slot are called as Yum reaches that slot.
+a given 'slot'. A slot is simply a point in Yum's execution. All plugin hook fun
+ctions for a given slot are called as Yum reaches that slot.
 
 Registration of hook functions is automatic. The plugin module is inspected for
- functions named {{{ <slotname>_hook }}}. If a function matching a valid slot n
-ame is found then that function is automatically registered as a hook function.
+functions named {{{ <slotname>_hook }}}. If a function matching a valid slot nam
+e is found then that function is automatically registered as a hook function.
 
-Hook functions all take one argument, for a {{{ conduit }}} instance. Conduits
-are explained below.
+Hook functions all take one argument, for a {{{ conduit }}} instance. Conduits a
+re explained below.
 
 The following slots exist:
 {{{
@@ -100,67 +99,66 @@ clean
 }}}
 
 == Conduits ==
-An object known as a conduit is passed into hook functions when they are called
-. This object provides methods and attributes that should be used for all inter
-action that the plugin has with the rest of Yum.
+An object known as a conduit is passed into hook functions when they are called.
+ This object provides methods and attributes that should be used for all interac
+tion that the plugin has with the rest of Yum.
 
-The conduit varies depending on the plugin slot. Different methods and attribut
-es are available as appropriate for the slot. See the {{{ yum.plugins.SLOT_TO_C
-ONDUIT }}} dictionary for details on the conduit class used for a particular sl
-ot.  All conduits are subclassed from the {{{ PluginConduit }}} class.
+The conduit varies depending on the plugin slot. Different methods and attribute
+s are available as appropriate for the slot. See the {{{ yum.plugins.SLOT_TO_CON
+DUIT }}} dictionary for details on the conduit class used for a particular slot.
+  All conduits are subclassed from the {{{ PluginConduit }}} class.
 
 == API Dependencies ==
-The plugin API and general Yum API are subject to change. For this reason, plug
-ins must state which API they were written for via the {{{ requires_api_version
- }}} attribute. Yum will exit with a useful error if it tries to load the plugi
-n which is not compatible with its API version.
+The plugin API and general Yum API are subject to change. For this reason, plugi
+ns must state which API they were written for via the {{{ requires_api_version }
+}} attribute. Yum will exit with a useful error if it tries to load the plugin w
+hich is not compatible with its API version.
 
-In general, a plugin author should set {{{ requires_api_version }}} to the API
-version at the time that the plugin is written. The current API version can be
-found at {{{ yum.plugins.API_VERSION }}}.
+In general, a plugin author should set {{{ requires_api_version }}} to the API v
+ersion at the time that the plugin is written. The current API version can be fo
+und at {{{ yum.plugins.API_VERSION }}}.
 
 The {{{ yum.plugins }}} module documents how the API version is incremented and
- the rules for compatibility tests.
+the rules for compatibility tests.
 
 == Plugin Types ==
 Plugins must advertise what type of plugin they are via the {{{ plugin_type }}}
- tuple. The advertised type(s) can be used by software using the Yum libraries
-to control the types of plugins that will be loaded. Yum itself will always loa
-d all types of plugins.
+tuple. The advertised type(s) can be used by software using the Yum libraries to
+ control the types of plugins that will be loaded. Yum itself will always load a
+ll types of plugins.
 
 A plugin may have more than one type. Two plugin types currently exist.
 
 {{{
 TYPE_CORE
     A core plugin modifies Yum's base functionality. For example, a core plugin
- might modify
+might modify
     package exclusions, dependency resolving or repository loading.
 
 TYPE_INTERACTIVE
-    An interative plugin may modify Yum's user interface flow. For example, a T
-YPE_INTERACTIVE
-    plugin might terminate Yum early in some conditions or output extra informa
-tion to the user.
+    An interative plugin may modify Yum's user interface flow. For example, a TY
+PE_INTERACTIVE
+    plugin might terminate Yum early in some conditions or output extra informat
+ion to the user.
 
-    In Yum versions 2.6.x and earlier (plugin API version < 2.3) this constant
-was called
-    TYPE_INTERFACE. The purpose of TYPE_INTERFACE is the same as TYPE_INTERACTI
-VE
+    In Yum versions 2.6.x and earlier (plugin API version < 2.3) this constant w
+as called
+    TYPE_INTERFACE. The purpose of TYPE_INTERFACE is the same as TYPE_INTERACTIV
+E
     but the meaning of the old name wasn't clear and so it has been deprecated.
-
 }}}
 
 == Stopping Yum ==
-A plugin may stop Yum's execution at any point by raising the {{{ yum.plugins.P
-luginYumExit }}} exception. The argument of the exception will be displayed to
-the user as Yum terminates.
+A plugin may stop Yum's execution at any point by raising the {{{ yum.plugins.Pl
+uginYumExit }}} exception. The argument of the exception will be displayed to th
+e user as Yum terminates.
 
 == Reading Private Plugin Options ==
-Each plugin has its own configuration file in {{{ /etc/yum/pluginconf.d/ }}}. T
-hese configuration files follow standard INI file conventions like Yum's own co
-nfiguration files. Arbitrary options can be read from a plugin's configuration
-file at any time by using the following methods. These are available on any con
-duit instance:
+Each plugin has its own configuration file in {{{ /etc/yum/pluginconf.d/ }}}. Th
+ese configuration files follow standard INI file conventions like Yum's own conf
+iguration files. Arbitrary options can be read from a plugin's configuration fil
+e at any time by using the following methods. These are available on any conduit
+ instance:
 
 {{{
     #!python numbering=off
@@ -173,10 +171,10 @@ duit instance:
     def confBool(self, section, opt, default=None)
 }}}
 
-If the option is missing from the configuration file then the default value pas
-sed to method will be returned. See {{{ yum.plugins }}} for more documentation
-on these methods and see the {{{ yum(8) }}} and {{{ yum.conf(5) }}} man pages f
-or general information on plugin configuration files.
+If the option is missing from the configuration file then the default value pass
+ed to method will be returned. See {{{ yum.plugins }}} for more documentation on
+ these methods and see the {{{ yum(8) }}} and {{{ yum.conf(5) }}} man pages for
+general information on plugin configuration files.
 
 == Extending Yum's Configuration Options ==
 
@@ -185,13 +183,12 @@ options available in Yum's own configuration files. A plugin can add new
 options or modify the existing options by modifying the {{{ YumConf }}} and
 {{{ RepoConf }}} classes defined in {{{ yum.config }}}.
 
-The {{{ YumConf }}} class defines options that are available in the {{{ [main]
-}}}
-section of {{{ yum.conf }}}. The {{{ RepoConf }}} class defines options that ar
-e
+The {{{ YumConf }}} class defines options that are available in the {{{ [main] }
+}}
+section of {{{ yum.conf }}}. The {{{ RepoConf }}} class defines options that are
 available in each repository sections of Yum's configuration file(s).
-Modifications to {{{ YumConf }}} and {{{ RepoConf }}} should occur in the {{{ c
-onfig }}}
+Modifications to {{{ YumConf }}} and {{{ RepoConf }}} should occur in the {{{ co
+nfig }}}
 slot.
 
 Here is a simple example of how options can be added to Yum's configuration
@@ -233,18 +230,17 @@ def init_hook(conduit):
         conduit.info(2, "%s.max_foo = %r" % (repo.id, repo.max_foo))
 }}}
 
-Note how different types of options are defined ({{{ IntOption }}}, {{{ UrlOpti
-on }}},
+Note how different types of options are defined ({{{ IntOption }}}, {{{ UrlOptio
+n }}},
 {{{ BoolOption }}}). A wide variety of option types are available in
 {{{ yum.config }}}. It is even possible for plugins to define their own option
-types by subclassing {{{ Option }}} if the existing types aren't sufficient. Se
-e
+types by subclassing {{{ Option }}} if the existing types aren't sufficient. See
 the source code for the {{{ yum.config }}} module for further details.
 
 == Extending Yum's Configuration Options (pre Yum 2.9.x, deprecated) ==
-In addition to having their own configuration file, plugins may add extra optio
-ns to Yum's main configuration files. A plugin must register new options in the
- {{{ config }}} slot using the {{{ registerOpt() }}} conduit method:
+In addition to having their own configuration file, plugins may add extra option
+s to Yum's main configuration files. A plugin must register new options in the {
+{{ config }}} slot using the {{{ registerOpt() }}} conduit method:
 {{{
 #!python numbering=off
     registerOpt(name, valuetype, where, default)
@@ -271,13 +267,13 @@ where
 default
     The default value returned for the option if it isn't present.
 }}}
-The option values defined in the {{{ [main] }}} section may be read by calling
-the
-{{{ getConf() }}} repository method. The options will be available as attribute
-s of the returned object.
+The option values defined in the {{{ [main] }}} section may be read by calling t
+he
+{{{ getConf() }}} repository method. The options will be available as attributes
+ of the returned object.
 
-New repository options will be available as attributes of the repository object
-s returned via the {{{ getRepos() }}} conduit method.
+New repository options will be available as attributes of the repository objects
+ returned via the {{{ getRepos() }}} conduit method.
 
 The following example plugin shows how a custom option may be defined and
 read:
@@ -303,11 +299,11 @@ read:
 == Extending Yum's Command Line Options ==
 A plugin may add extra command line options to Yum. To do this the plugin
 should call the {{{ getOptParser() }}} conduit method during the {{{ config }}}
- or
-{{{ init }}} slot. This will return an {{{ OptionParser }}} instance which the
-plugin
-may modify.  See the Python standard library {{{ optparse }}} module documentat
-ion for information on how to manipulate this object.
+or
+{{{ init }}} slot. This will return an {{{ OptionParser }}} instance which the p
+lugin
+may modify.  See the Python standard library {{{ optparse }}} module documentati
+on for information on how to manipulate this object.
 
 The parsed command line options may be read in any slot after the {{{ init }}}
 slot. The values returned are as for {{{ OptionParser.parse_args() }}}.
@@ -315,8 +311,8 @@ slot. The values returned are as for {{{ OptionParser.parse_args() }}}.
 Options added by plugins will show up in Yum's command line help output (ie.
 {{{ yum --help }}})
 
-The following plugin demonstrates the addition of new command line options by a
-dding a {{{ --downloadonly }}} option:
+The following plugin demonstrates the addition of new command line options by ad
+ding a {{{ --downloadonly }}} option:
 {{{
 #!python numbering=off
     from yum.plugins import PluginYumExit, TYPE_INTERACTIVE
@@ -339,8 +335,8 @@ dding a {{{ --downloadonly }}} option:
 == More Examples ==
 The easiest way to get started writing Yum plugins is to look at some examples.
 The yum-utils package contains a number of useful plugins which will act as a
-useful starting point. The yum-utils git tree can be viewed here: [http://yum.b
-aseurl.org/gitweb/?p=yum-utils.git;a=tree]
+useful starting point. The yum-utils git tree can be viewed here: [http://yum.ba
+seurl.org/gitweb/?p=yum-utils.git;a=tree]
 ----
 
 

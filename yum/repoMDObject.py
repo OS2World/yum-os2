@@ -14,16 +14,12 @@
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 # Copyright 2006 Duke University
 
-try:
-    from xml.etree import cElementTree
-except ImportError:
-    import cElementTree
-iterparse = cElementTree.iterparse
+from yum.misc import cElementTree_iterparse as iterparse 
 from Errors import RepoMDError
 
 import sys
 import types
-from misc import AutoFileChecksums
+from misc import AutoFileChecksums, to_xml
 
 def ns_cleanup(qn):
     if qn.find('}') == -1: return qn 
@@ -31,8 +27,10 @@ def ns_cleanup(qn):
 
 class RepoData:
     """represents anything beneath a <data> tag"""
-    def __init__(self, elem):
-        self.type = elem.attrib.get('type')
+    def __init__(self, elem=None):
+        self.type = None
+        if elem:
+            self.type = elem.attrib.get('type')
         self.location = (None, None)
         self.checksum = (None,None) # type,value
         self.openchecksum = (None,None) # type,value
@@ -40,8 +38,9 @@ class RepoData:
         self.dbversion = None
         self.size      = None
         self.opensize  = None
-    
-        self.parse(elem)
+
+        if elem:
+            self.parse(elem)
 
     def parse(self, elem):
         
@@ -70,11 +69,47 @@ class RepoData:
                 self.size = child.text
             elif child_name == 'open-size':
                 self.opensize = child.text
+
+    def dump_xml(self):
+        msg = ""
+        top = """<data type="%s">\n""" % to_xml(self.type, attrib=True)
+        msg += top
+        
+        for (data, xmlname) in [('checksum', 'checksum'),('openchecksum', 'open-checksum')]:
+            if hasattr(self, data):
+                val = getattr(self, data)
+                if val[0]:
+                    d_xml = """  <%s type="%s">%s</%s>\n""" % (xmlname,
+                                       to_xml(val[0], attrib=True), 
+                                       to_xml(val[1]), xmlname)
+                    msg += d_xml
+
+        if hasattr(self, 'location'):
+            val = getattr(self, 'location')
+            if val[1]:
+                loc = """  <location href="%s"/>\n""" % to_xml(val[1], attrib=True)
+                if val[0]:
+                    loc = """  <location xml:base="%s" href="%s"/>\n""" % (
+                       to_xml(val[0], attrib=True), to_xml(val[1], attrib=True))
+                msg += loc
+            
+        for (data,xmlname) in [('timestamp', 'timestamp'),
+                               ('dbversion', 'database_version'),
+                               ('size','size'), ('opensize', 'open-size')]:
+            val = getattr(self, data)
+            if val:
+                d_xml = """  <%s>%s</%s>\n""" % (xmlname, to_xml(val), 
+                                                 xmlname)
+                msg += d_xml
+
+        bottom = """</data>\n"""
+        msg += bottom
+        return msg
         
 class RepoMD:
     """represents the repomd xml file"""
     
-    def __init__(self, repoid, srcfile):
+    def __init__(self, repoid, srcfile=None):
         """takes a repoid and a filename for the repomd.xml"""
         
         self.timestamp = 0
@@ -83,8 +118,12 @@ class RepoMD:
         self.checksums = {}
         self.length    = 0
         self.revision  = None
-        self.tags      = {'content' : set(), 'distro' : {}}
-        
+        self.tags      = {'content' : set(), 'distro' : {}, 'repo': set()}
+    
+        if srcfile:
+            self.parse(srcfile)
+    
+    def parse(self, srcfile):
         if type(srcfile) in types.StringTypes:
             # srcfile is a filename string
             try:
@@ -168,6 +207,41 @@ class RepoMD:
             print '    open checksum: %s - %s' %  thisdata.openchecksum
             print '    dbversion    : %s' % thisdata.dbversion
             print ''
+    def dump_xml(self):
+        msg = ""
+        
+        top = """<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">\n"""
+        msg += top
+        if self.revision:
+            rev = """ <revision>%s</revision>\n""" % to_xml(self.revision)
+            msg += rev
+        
+        if self.tags['content'] or self.tags['distro'] or self.tags['repo']:
+            tags = """ <tags>\n"""
+            for item in self.tags['content']:
+                tag = """   <content>%s</content>\n""" % (to_xml(item))
+                tags += tag
+            for item in self.tags['repo']:
+                tag = """   <repo>%s</repo>\n""" % (to_xml(item))
+                tags += tag
+            for (cpeid, item) in self.tags['distro']:
+                itemlist = list(item) # frellingsets.
+                if cpeid:
+                    tag = """   <distro cpeid="%s">%s</distro>\n""" % (
+                                to_xml(cpeid, attrib=True), to_xml(itemlist[0]))
+                else:
+                    tag = """   <distro>%s</distro>\n""" % (to_xml(itemlist[0]))
+                tags += tag
+            tags += """ </tags>\n"""
+            msg += tags
+        
+        for md in self.repoData.values():
+            msg += md.dump_xml()
+        
+        msg += """</repomd>\n"""
+
+        return msg
 
 def main():
 

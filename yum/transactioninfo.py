@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -39,7 +40,7 @@ class GetProvReqOnlyPackageSack(PackageSack):
         self._need_index_files = need_files
 
     def __addPackageToIndex_primary_files(self, obj):
-        for ftype in obj.returnFileTypes():
+        for ftype in obj.returnFileTypes(primary_only=True):
             for file in obj.returnFileEntries(ftype, primary_only=True):
                 self._addToDictAsList(self.filenames, file, obj)
     def __addPackageToIndex_files(self, obj):
@@ -82,16 +83,14 @@ class TransactionData:
         self.debug = 0
         self.changed = False
         self.installonlypkgs = []
-        
+        self.state_counter = 0
         self.conditionals = {} # key = pkgname, val = list of pos to add
 
         self.rpmdb = None
         self.pkgSack = None
         self.pkgSackPackages = 0
         self.localSack = PackageSack()
-        # FIXME: This is turned off atm. ... it'll be turned on when
-        #        the new yum-metadata-parser with the "pkgfiles" index is std.
-        self._inSack = None # GetProvReqOnlyPackageSack()
+        self._inSack = GetProvReqOnlyPackageSack()
 
         # lists of txmbrs in their states - just placeholders
         self.instgroups = []
@@ -105,6 +104,7 @@ class TransactionData:
         self.depupdated = []
         self.reinstalled = []
         self.downgraded = []
+        self.failed = []
         
     def __len__(self):
         return len(self.pkgdict)
@@ -132,7 +132,7 @@ class TransactionData:
         if pkgtup is None:
             for members in self.pkgdict.itervalues():
                 returnlist.extend(members)            
-        elif self.pkgdict.has_key(pkgtup):
+        elif pkgtup in self.pkgdict:
             returnlist.extend(self.pkgdict[pkgtup])
         return returnlist
             
@@ -195,6 +195,39 @@ class TransactionData:
 
         return result
 
+    def deselect(self, pattern):
+        """ Remove these packages from the transaction. This is more user
+            orientated than .remove(). Used from kickstart/install -blah. """
+
+        #  We don't have a returnPackages() here, so just try the "simple" 
+        # specifications. Pretty much 100% hit rate on kickstart.
+        txmbrs = self.matchNaevr(pattern)
+        if not txmbrs:
+            na = pattern.rsplit('.', 2)
+            if len(na) == 2:
+                txmbrs = self.matchNaevr(na[0], na[1])
+
+        if not txmbrs:
+            if self.pkgSack is None:
+                pkgs = []
+            else:
+                pkgs = self.pkgSack.returnPackages(patterns=[pattern])
+            if not pkgs:
+                pkgs = self.rpmdb.returnPackages(patterns=[pattern])
+
+            for pkg in pkgs:
+                txmbrs.extend(self.getMembers(pkg.pkgtup))
+                #  Now we need to do conditional group packages, so they don't
+                # get added later on. This is hacky :(
+                for req, cpkgs in self.conditionals.iteritems():
+                    if pkg in cpkgs:
+                        cpkgs.remove(pkg)
+                        self.conditionals[req] = cpkgs
+
+        for txmbr in txmbrs:
+            self.remove(txmbr.pkgtup)
+        return txmbrs
+
     def _isLocalPackage(self, txmember):
         # Is this the right criteria?
         # FIXME: This is kinda weird, we really want all local pkgs to be in a
@@ -234,14 +267,19 @@ class TransactionData:
         self.pkgdict[txmember.pkgtup].append(txmember)
         self._namedict.setdefault(txmember.name, []).append(txmember)
         self.changed = True
+        self.state_counter += 1
         if self._isLocalPackage(txmember):
             self.localSack.addPackage(txmember.po)
         elif isinstance(txmember.po, YumAvailablePackageSqlite):
             self.pkgSackPackages += 1
         if self._inSack is not None and txmember.output_state in TS_INSTALL_STATES:
-            self._inSack.addPackage(txmember.po)
+            if not txmember.po.have_fastReturnFileEntries():
+                # In theory we could keep this on if a "small" repo. fails
+                self._inSack = None
+            else:
+                self._inSack.addPackage(txmember.po)
 
-        if self.conditionals.has_key(txmember.name):
+        if txmember.name in self.conditionals:
             for pkg in self.conditionals[txmember.name]:
                 if self.rpmdb.contains(po=pkg):
                     continue
@@ -270,10 +308,11 @@ class TransactionData:
         if not self._namedict[pkgtup[0]]:
             del self._namedict[pkgtup[0]]
         self.changed = True        
+        self.state_counter += 1
     
     def exists(self, pkgtup):
         """tells if the pkg is in the class"""
-        if self.pkgdict.has_key(pkgtup):
+        if pkgtup in self.pkgdict:
             if len(self.pkgdict[pkgtup]) != 0:
                 return 1
         
@@ -314,8 +353,7 @@ class TransactionData:
                     self.updated.append(txmbr)
                     
             elif txmbr.output_state in (TS_INSTALL, TS_TRUEINSTALL):
-                if include_reinstall and self.rpmdb.contains(po=txmbr.po):
-                    txmbr.reinstall = True
+                if include_reinstall and txmbr.reinstall:
                     self.reinstalled.append(txmbr)
                     continue
 
@@ -368,7 +406,6 @@ class TransactionData:
         self.downgraded.sort()
         self.failed.sort()
 
-    
     def addInstall(self, po):
         """adds a package as an install but in mode 'u' to the ts
            takes a packages object and returns a TransactionMember Object"""
@@ -382,6 +419,11 @@ class TransactionData:
         txmbr.po.state = TS_INSTALL        
         txmbr.ts_state = 'u'
         txmbr.reason = 'user'
+
+        if self.rpmdb.contains(po=txmbr.po):
+            txmbr.reinstall = True
+        
+        self.findObsoletedByThisMember(txmbr)
         self.add(txmbr)
         return txmbr
 
@@ -395,6 +437,10 @@ class TransactionData:
         txmbr.po.state = TS_INSTALL        
         txmbr.ts_state = 'i'
         txmbr.reason = 'user'
+
+        if self.rpmdb.contains(po=txmbr.po):
+            txmbr.reinstall = True
+
         self.add(txmbr)
         return txmbr
     
@@ -428,6 +474,7 @@ class TransactionData:
             txmbr.updates.append(oldpo)
             
         self.add(txmbr)
+        self.findObsoletedByThisMember(txmbr)
         return txmbr
 
     def addDowngrade(self, po, oldpo):
@@ -455,7 +502,7 @@ class TransactionData:
         txmbr.current_state = TS_INSTALL
         txmbr.output_state =  TS_UPDATED
         txmbr.po.state = TS_UPDATED
-        txmbr.ts_state = None # FIXME: should use a real state here.
+        txmbr.ts_state = 'ud'
         txmbr.relatedto.append((updating_po, 'updatedby'))
         txmbr.updated_by.append(updating_po)
         self.add(txmbr)
@@ -472,6 +519,10 @@ class TransactionData:
         txmbr.ts_state = 'u'
         txmbr.relatedto.append((oldpo, 'obsoletes'))
         txmbr.obsoletes.append(oldpo)
+
+        if self.rpmdb.contains(po=txmbr.po):
+            txmbr.reinstall = True
+
         self.add(txmbr)
         return txmbr
 
@@ -483,7 +534,7 @@ class TransactionData:
         txmbr.current_state = TS_INSTALL
         txmbr.output_state =  TS_OBSOLETED
         txmbr.po.state = TS_OBSOLETED
-        txmbr.ts_state = None # FIXME: should use a real state here.
+        txmbr.ts_state = 'od'
         txmbr.relatedto.append((obsoleting_po, 'obsoletedby'))
         txmbr.obsoleted_by.append(obsoleting_po)
         self.add(txmbr)
@@ -573,7 +624,7 @@ class TransactionData:
         for txmbr in self.getMembersWithState(None, TS_INSTALL_STATES):
             # reinstalls have to use their "new" checksum data, in case it's
             # different.
-            if hasattr(txmbr, 'reinstall') and txmbr.reinstall:
+            if txmbr.reinstall:
                 _reinstalled_pkgtups[txmbr.po.pkgtup] = txmbr.po
             pkgs.append(txmbr.po)
 
@@ -600,12 +651,25 @@ class TransactionData:
             csum = None
             if 'checksum_type' in ydbi and 'checksum_data' in ydbi:
                 csum = (ydbi.checksum_type, ydbi.checksum_data)
-                pkg_checksum_tups.append((pkg.pkgtup, csum))
+            #  We need all the pkgtups, so we even save the ones without a
+            # checksum.
+            pkg_checksum_tups.append((pkg.pkgtup, csum))
             main.update(pkg, csum)
 
         self.rpmdb.transactionCachePackageChecksums(pkg_checksum_tups)
 
         return main
+    
+    def findObsoletedByThisMember(self, txmbr):
+        """addObsoleted() pkgs for anything that this txmbr will obsolete"""
+        # this is mostly to keep us in-line with what will ACTUALLY happen
+        # when rpm hits the obsoletes, whether we added them or not
+        for obs_n in txmbr.po.obsoletes_names:
+            for pkg in self.rpmdb.searchNevra(name=obs_n):
+                if pkg.obsoletedBy([txmbr.po]):
+                    self.addObsoleted(pkg, txmbr.po)
+                    txmbr.output_state = TS_OBSOLETING
+                    txmbr.po.state = TS_OBSOLETING
 
 class ConditionalTransactionData(TransactionData):
     """A transaction data implementing conditional package addition"""
@@ -677,7 +741,7 @@ class TransactionMember:
         self.output_state = None # what state to list if printing it
         self.isDep = 0
         self.reason = 'user' # reason for it to be in the transaction set
-        self.process = None # 
+        self.process = None #  I think this is used nowhere by nothing - skv 2010/11/03
         self.relatedto = [] # ([relatedpkg, relationship)]
         self.depends_on = []
         self.obsoletes = []
@@ -686,6 +750,7 @@ class TransactionMember:
         self.updated_by = []
         self.downgrades = []
         self.downgraded_by = []
+        self.reinstall = False
         self.groups = [] # groups it's in
         self._poattr = ['pkgtup', 'repoid', 'name', 'arch', 'epoch', 'version',
                         'release']
@@ -693,6 +758,14 @@ class TransactionMember:
         for attr in self._poattr:
             val = getattr(self.po, attr)
             setattr(self, attr, val)
+
+        if po.repoid == 'installed':
+            #  We want to load these so that we can auto hardlink in the same
+            # new values. Because of the hardlinks it should be really cheap
+            # to load them ... although it's still a minor hack.
+            po.yumdb_info.get('from_repo')
+            po.yumdb_info.get('releasever')
+            po.yumdb_info.get('changed_by')
 
     def setAsDep(self, po=None):
         """sets the transaction member as a dependency and maps the dep into the
@@ -715,14 +788,42 @@ class TransactionMember:
 
     def __repr__(self):
         return "<%s : %s (%s)>" % (self.__class__.__name__, str(self),hex(id(self))) 
+    
+    def _dump(self):
+        msg = "mbr: %s,%s,%s,%s,%s %s\n" % (self.name, self.arch, self.epoch, 
+                     self.version, self.release, self.current_state)
+        msg += "  repo: %s\n" % self.po.repo.id
+        msg += "  ts_state: %s\n" % self.ts_state
+        msg += "  output_state: %s\n" %  self.output_state
+        msg += "  isDep: %s\n" %  bool(self.isDep)
+        msg += "  reason: %s\n" % self.reason
+        #msg += "  process: %s\n" % self.process
+        msg += "  reinstall: %s\n" % bool(self.reinstall)
         
-    # This is the tricky part - how do we nicely setup all this data w/o going insane
-    # we could make the txmember object be created from a YumPackage base object
-    # we still may need to pass in 'groups', 'ts_state', 'output_state', 'reason', 'current_state'
-    # and any related packages. A world of fun that will be, you betcha
-    
-    
-    # definitions
-    # current and output states are defined in constants
-    # relationships are defined in constants
-    # ts states are: u, i, e
+        if self.relatedto:
+            msg += "  relatedto:"
+            for (po, rel) in self.relatedto:
+                pkgorigin = 'a'
+                if isinstance(po, YumInstalledPackage):
+                    pkgorigin = 'i'
+                msg += " %s,%s,%s,%s,%s@%s:%s" % (po.name, po.arch, po.epoch, 
+                      po.version, po.release, pkgorigin, rel)
+            msg += "\n"
+            
+        for lst in ['depends_on', 'obsoletes', 'obsoleted_by', 'downgrades',
+                    'downgraded_by', 'updates', 'updated_by']:
+            thislist = getattr(self, lst)
+            if thislist:
+                msg += "  %s:" % lst
+                for po in thislist:
+                    pkgorigin = 'a'
+                    if isinstance(po, YumInstalledPackage):
+                        pkgorigin = 'i'
+                    msg += " %s,%s,%s,%s,%s@%s" % (po.name, po.arch, po.epoch, 
+                        po.version, po.release, pkgorigin)
+                msg += "\n"
+                
+        if self.groups:
+            msg += "  groups: %s\n" % ' '.join(self.groups)
+
+        return msg

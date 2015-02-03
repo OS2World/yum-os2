@@ -22,22 +22,24 @@ Update metadata (updateinfo.xml) parsing.
 """
 
 import sys
-import gzip
 
-from yum.i18n import utf8_text_wrap, to_utf8
+from yum.i18n import utf8_text_wrap, to_utf8, to_unicode
 from yum.yumRepo import YumRepository
 from yum.packages import FakeRepository
-from yum.misc import to_xml
+from yum.misc import to_xml, decompress, repo_gen_decompress
+from yum.misc import cElementTree_iterparse as iterparse 
 import Errors
 
 import rpmUtils.miscutils
 
-try:
-    from xml.etree import cElementTree
-except ImportError:
-    import cElementTree
-iterparse = cElementTree.iterparse
 
+def safe_iterparse(filename):
+    """ Works like iterparse, but hides XML errors (prints a warning). """
+    try:
+        for event, elem in iterparse(filename):
+            yield event, elem
+    except SyntaxError: # Bad XML
+        print >> sys.stderr, "File is not valid XML:", filename
 
 class UpdateNoticeException(Exception):
     """ An exception thrown for bad UpdateNotice data. """
@@ -63,6 +65,10 @@ class UpdateNotice(object):
             'issued'           : '',
             'updated'          : '',
             'description'      : '',
+            'rights'           : '',
+            'severity'         : '',
+            'summary'          : '',
+            'solution'         : '',
             'references'       : [],
             'pkglist'          : [],
             'reboot_suggested' : False
@@ -73,12 +79,12 @@ class UpdateNotice(object):
 
     def __getitem__(self, item):
         """ Allows scriptable metadata access (ie: un['update_id']). """
-        return self._md.has_key(item) and self._md[item] or None
+        return self._md.get(item) or None
 
     def __setitem__(self, item, val):
-       self._md[item] = val
+        self._md[item] = val
 
-    def __str__(self):
+    def text(self, skip_data=('files', 'summary', 'rights', 'solution')):
         head = """
 ===============================================================================
   %(title)s
@@ -95,7 +101,7 @@ class UpdateNotice(object):
 
         # Add our bugzilla references
         bzs = filter(lambda r: r['type'] == 'bugzilla', self._md['references'])
-        if len(bzs):
+        if len(bzs) and 'bugs' not in skip_data:
             buglist = "       Bugs :"
             for bz in bzs:
                 buglist += " %s%s\n\t    :" % (bz['id'], 'title' in bz
@@ -104,16 +110,39 @@ class UpdateNotice(object):
 
         # Add our CVE references
         cves = filter(lambda r: r['type'] == 'cve', self._md['references'])
-        if len(cves):
+        if len(cves) and 'cves' not in skip_data:
             cvelist = "       CVEs :"
             for cve in cves:
                 cvelist += " %s\n\t    :" % cve['id']
             head += cvelist[: - 1].rstrip() + '\n'
 
-        if self._md['description'] is not None:
+        if self._md['summary'] and 'summary' not in skip_data:
+            data = utf8_text_wrap(self._md['summary'], width=64,
+                                  subsequent_indent=' ' * 12 + ': ')
+            head += "    Summary : %s\n" % '\n'.join(data)
+
+        if self._md['description'] and 'description' not in skip_data:
             desc = utf8_text_wrap(self._md['description'], width=64,
                                   subsequent_indent=' ' * 12 + ': ')
             head += "Description : %s\n" % '\n'.join(desc)
+
+        if self._md['solution'] and 'solution' not in skip_data:
+            data = utf8_text_wrap(self._md['solution'], width=64,
+                                  subsequent_indent=' ' * 12 + ': ')
+            head += "   Solution : %s\n" % '\n'.join(data)
+
+        if self._md['rights'] and 'rights' not in skip_data:
+            data = utf8_text_wrap(self._md['rights'], width=64,
+                                  subsequent_indent=' ' * 12 + ': ')
+            head += "     Rights : %s\n" % '\n'.join(data)
+
+        if self._md['severity'] and 'severity' not in skip_data:
+            data = utf8_text_wrap(self._md['severity'], width=64,
+                                  subsequent_indent=' ' * 12 + ': ')
+            head += "   Severity : %s\n" % '\n'.join(data)
+
+        if 'files' in skip_data:
+            return head[:-1] # chop the last '\n'
 
         #  Get a list of arches we care about:
         #XXX ARCH CHANGE - what happens here if we set the arch - we need to
@@ -130,6 +159,11 @@ class UpdateNotice(object):
 
         return head
 
+    def __str__(self):
+        return to_utf8(self.text())
+    def __unicode__(self):
+        return to_unicode(self.text())
+
     def get_metadata(self):
         """ Return the metadata dict. """
         return self._md
@@ -139,7 +173,8 @@ class UpdateNotice(object):
         Parse an update element::
 
             <!ELEMENT update (id, synopsis?, issued, updated,
-                              references, description, pkglist)>
+                              references, description, rights?,
+                              severity?, summary?, solution?, pkglist)>
                 <!ATTLIST update type (errata|security) "errata">
                 <!ATTLIST update status (final|testing) "final">
                 <!ATTLIST update version CDATA #REQUIRED>
@@ -163,6 +198,14 @@ class UpdateNotice(object):
                     self._parse_references(child)
                 elif child.tag == 'description':
                     self._md['description'] = child.text
+                elif child.tag == 'rights':
+                    self._md['rights'] = child.text
+                elif child.tag == 'severity':
+                    self._md[child.tag] = child.text
+                elif child.tag == 'summary':
+                    self._md['summary'] = child.text
+                elif child.tag == 'solution':
+                    self._md['solution'] = child.text
                 elif child.tag == 'pkglist':
                     self._parse_pkglist(child)
                 elif child.tag == 'title':
@@ -179,7 +222,7 @@ class UpdateNotice(object):
             <!ELEMENT references (reference*)>
             <!ELEMENT reference>
                 <!ATTLIST reference href CDATA #REQUIRED>
-                <!ATTLIST reference type (self|cve|bugzilla) "self">
+                <!ATTLIST reference type (self|other|cve|bugzilla) "self">
                 <!ATTLIST reference id CDATA #IMPLIED>
                 <!ATTLIST reference title CDATA #IMPLIED>
         """
@@ -232,6 +275,12 @@ class UpdateNotice(object):
         package = {}
         for pkgfield in ('arch', 'epoch', 'name', 'version', 'release', 'src'):
             package[pkgfield] = elem.attrib.get(pkgfield)
+
+        #  Bad epoch and arch data is the most common (missed) screwups.
+        # Deal with bad epoch data.
+        if not package['epoch'] or package['epoch'][0] not in '0123456789':
+            package['epoch'] = None
+
         for child in elem:
             if child.tag == 'filename':
                 package['filename'] = child.text
@@ -255,7 +304,16 @@ class UpdateNotice(object):
                 to_xml(self._md['title']), to_xml(self._md['release']),
                 to_xml(self._md['issued'], attrib=True),
                 to_xml(self._md['description']))
-        
+
+        if self._md['summary']:
+            msg += """  <summary>%s</summary>\n""" % (to_xml(self._md['summary']))
+        if self._md['solution']:
+            msg += """  <solution>%s</solution>\n""" % (to_xml(self._md['solution']))
+        if self._md['rights']:
+            msg += """  <rights>%s</rights>\n""" % (to_xml(self._md['rights']))        
+        if self._md['severity']:
+            msg += """  <severity>%s</severity>\n""" % (to_xml(self._md['severity']))
+
         if self._md['references']:
             msg += """  <references>\n"""
             for ref in self._md['references']:
@@ -328,20 +386,22 @@ class UpdateMetadata(object):
         """
         if type(nvr) in (type([]), type(())):
             nvr = '-'.join(nvr)
-        return self._cache.has_key(nvr) and self._cache[nvr] or None
+        return self._cache.get(nvr) or None
 
     #  The problem with the above "get_notice" is that not everyone updates
     # daily. So if you are at pkg-1, pkg-2 has a security notice, and pkg-3
     # has a BZ fix notice. All you can see is the BZ notice for the new "pkg-3"
     # with the above.
     #  So now instead you lookup based on the _installed_ pkg.pkgtup, and get
-    # two notices, in order: [(pkg-3, notice), (pkg-2, notice)]
+    # two notices, in order: [(pkgtup-3, notice), (pkgtup-2, notice)]
     # the reason for the sorting order is that the first match will give you
     # the minimum pkg you need to move to.
     def get_applicable_notices(self, pkgtup):
         """
         Retrieve any update notices which are newer than a
         given std. pkgtup (name, arch, epoch, version, release) tuple.
+        Returns: list of (pkgtup, notice) that are newer than the given pkgtup,
+                 in the order of newest pkgtups first.
         """
         oldpkgtup = pkgtup
         name = oldpkgtup[0]
@@ -380,20 +440,23 @@ class UpdateMetadata(object):
         if not obj:
             raise UpdateNoticeException
         if type(obj) in (type(''), type(u'')):
-            infile = obj.endswith('.gz') and gzip.open(obj) or open(obj, 'rt')
+            unfile = decompress(obj)
+            infile = open(unfile, 'rt')
+
         elif isinstance(obj, YumRepository):
             if obj.id not in self._repos:
                 self._repos.append(obj.id)
                 md = obj.retrieveMD(mdtype)
                 if not md:
                     raise UpdateNoticeException()
-                infile = gzip.open(md)
+                unfile = repo_gen_decompress(md, 'updateinfo.xml')
+                infile = open(unfile, 'rt')
         elif isinstance(obj, FakeRepository):
             raise Errors.RepoMDError, "No updateinfo for local pkg"
         else:   # obj is a file object
             infile = obj
 
-        for event, elem in iterparse(infile):
+        for event, elem in safe_iterparse(infile):
             if elem.tag == 'update':
                 try:
                     un = UpdateNotice(elem)
