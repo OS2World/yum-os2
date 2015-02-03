@@ -33,6 +33,15 @@ from yum.i18n import utf8_width, utf8_width_fill, to_unicode
 
 import yum.config
 
+def _err_mini_usage(base, basecmd):
+    if basecmd not in base.yum_cli_commands:
+        base.usage()
+        return
+    cmd = base.yum_cli_commands[basecmd]
+    txt = base.yum_cli_commands["help"]._makeOutput(cmd)
+    base.logger.critical(_(' Mini usage:\n'))
+    base.logger.critical(txt)
+
 def checkRootUID(base):
     """
     Verify that the program is being run by the root user.
@@ -46,7 +55,7 @@ def checkRootUID(base):
 def checkGPGKey(base):
     if not base.gpgKeyCheck():
         for repo in base.repos.listEnabled():
-            if (repo.gpgcheck or repo.repo_gpgcheck) and repo.gpgkey == '':
+            if (repo.gpgcheck or repo.repo_gpgcheck) and not repo.gpgkey:
                 msg = _("""
 You have enabled checking of packages via GPG keys. This is a good thing. 
 However, you do not have any GPG public keys installed. You need to download
@@ -62,25 +71,26 @@ will install it for you.
 For more information contact your distribution or package provider.
 """)
                 base.logger.critical(msg)
+                base.logger.critical(_("Problem repository: %s"), repo)
                 raise cli.CliError
 
 def checkPackageArg(base, basecmd, extcmds):
     if len(extcmds) == 0:
         base.logger.critical(
                 _('Error: Need to pass a list of pkgs to %s') % basecmd)
-        base.usage()
+        _err_mini_usage(base, basecmd)
         raise cli.CliError
 
 def checkItemArg(base, basecmd, extcmds):
     if len(extcmds) == 0:
         base.logger.critical(_('Error: Need an item to match'))
-        base.usage()
+        _err_mini_usage(base, basecmd)
         raise cli.CliError
 
 def checkGroupArg(base, basecmd, extcmds):
     if len(extcmds) == 0:
         base.logger.critical(_('Error: Need a group or list of groups'))
-        base.usage()
+        _err_mini_usage(base, basecmd)
         raise cli.CliError    
 
 def checkCleanArg(base, basecmd, extcmds):
@@ -94,7 +104,7 @@ def checkCleanArg(base, basecmd, extcmds):
     for cmd in extcmds:
         if cmd not in VALID_ARGS:
             base.logger.critical(_('Error: invalid clean argument: %r') % cmd)
-            base.usage()
+            _err_mini_usage(base, basecmd)
             raise cli.CliError
 
 def checkShellArg(base, basecmd, extcmds):
@@ -122,14 +132,34 @@ def checkShellArg(base, basecmd, extcmds):
         base.usage()
         raise cli.CliError
 
+def checkEnabledRepo(base, possible_local_files=[]):
+    """
+    Verify that there is at least one enabled repo.
+
+    @param base: a YumBase object.
+    """
+    if base.repos.listEnabled():
+        return
+
+    for lfile in possible_local_files:
+        if lfile.endswith(".rpm") and os.path.exists(lfile):
+            return
+
+    msg = _('There are no enabled repos.\n'
+            ' Run "yum repolist all" to see the repos you have.\n'
+            ' You can enable repos with yum-config-manager --enable <repo>')
+    base.logger.critical(msg)
+    raise cli.CliError
+
 class YumCommand:
         
     def __init__(self):
         self.done_command_once = False
+        self.hidden = False
 
     def doneCommand(self, base, msg, *args):
         if not self.done_command_once:
-            base.verbose_logger.log(logginglevels.INFO_2, msg, *args)
+            base.verbose_logger.info(msg, *args)
         self.done_command_once = True
 
     def getNames(self):
@@ -176,6 +206,7 @@ class InstallCommand(YumCommand):
         checkRootUID(base)
         checkGPGKey(base)
         checkPackageArg(base, basecmd, extcmds)
+        checkEnabledRepo(base, extcmds)
 
     def doCommand(self, base, basecmd, extcmds):
         self.doneCommand(base, _("Setting up Install Process"))
@@ -186,7 +217,7 @@ class InstallCommand(YumCommand):
 
 class UpdateCommand(YumCommand):
     def getNames(self):
-        return ['update']
+        return ['update', 'update-to']
 
     def getUsage(self):
         return _("[PACKAGE...]")
@@ -197,11 +228,35 @@ class UpdateCommand(YumCommand):
     def doCheck(self, base, basecmd, extcmds):
         checkRootUID(base)
         checkGPGKey(base)
+        checkEnabledRepo(base, extcmds)
 
     def doCommand(self, base, basecmd, extcmds):
         self.doneCommand(base, _("Setting up Update Process"))
         try:
-            return base.updatePkgs(extcmds)
+            return base.updatePkgs(extcmds, update_to=(basecmd == 'update-to'))
+        except yum.Errors.YumBaseError, e:
+            return 1, [str(e)]
+
+class DistroSyncCommand(YumCommand):
+    def getNames(self):
+        return ['distribution-synchronization', 'distro-sync']
+
+    def getUsage(self):
+        return _("[PACKAGE...]")
+
+    def getSummary(self):
+        return _("Synchronize installed packages to the latest available versions")
+
+    def doCheck(self, base, basecmd, extcmds):
+        checkRootUID(base)
+        checkGPGKey(base)
+        checkEnabledRepo(base, extcmds)
+
+    def doCommand(self, base, basecmd, extcmds):
+        self.doneCommand(base, _("Setting up Distribution Synchronization Process"))
+        try:
+            base.conf.obsoletes = 1
+            return base.distroSyncPkgs(extcmds)
         except yum.Errors.YumBaseError, e:
             return 1, [str(e)]
 
@@ -238,7 +293,7 @@ class InfoCommand(YumCommand):
         return ['info']
 
     def getUsage(self):
-        return "[PACKAGE|all|installed|updates|extras|obsoletes|recent]"
+        return "[PACKAGE|all|available|installed|updates|extras|obsoletes|recent]"
 
     def getSummary(self):
         return _("Display details about a package or group of packages")
@@ -375,8 +430,27 @@ class EraseCommand(YumCommand):
     def needTsRemove(self, base, basecmd, extcmds):
         return True
 
-class GroupCommand(YumCommand):
-    def doCommand(self, base, basecmd, extcmds):
+ 
+class GroupsCommand(YumCommand):
+    """ Single sub-command interface for most groups interaction. """
+
+    direct_commands = {'grouplist'    : 'list',
+                       'groupinstall' : 'install',
+                       'groupupdate'  : 'install',
+                       'groupremove'  : 'remove',
+                       'grouperase'   : 'remove',
+                       'groupinfo'    : 'info'}
+
+    def getNames(self):
+        return ['groups', 'group'] + self.direct_commands.keys()
+
+    def getUsage(self):
+        return "[list|info|summary|install|upgrade|remove|mark] [GROUP]"
+
+    def getSummary(self):
+        return _("Display, or use, the groups information")
+    
+    def _grp_setup_doCommand(self, base):
         self.doneCommand(base, _("Setting up Group Process"))
 
         base.doRepoSetup(dosack=0)
@@ -387,94 +461,85 @@ class GroupCommand(YumCommand):
         except yum.Errors.YumBaseError, e:
             return 1, [str(e)]
 
+    def _grp_cmd(self, basecmd, extcmds):
+        if basecmd in self.direct_commands:
+            cmd = self.direct_commands[basecmd]
+        elif extcmds:
+            cmd = extcmds[0]
+            extcmds = extcmds[1:]
+        else:
+            cmd = 'summary'
 
-class GroupListCommand(GroupCommand):
-    def getNames(self):
-        return ['grouplist']
+        remap = {'update' : 'upgrade',
+                 'erase' : 'remove',
+                 'mark-erase' : 'mark-remove',
+                 }
+        cmd = remap.get(cmd, cmd)
 
-    def getUsage(self):
-        return ""
+        return cmd, extcmds
 
-    def getSummary(self):
-        return _("List available package groups")
-    
-    def doCommand(self, base, basecmd, extcmds):
-        GroupCommand.doCommand(self, base, basecmd, extcmds)
-        return base.returnGroupLists(extcmds)
-
-    def needTs(self, base, basecmd, extcmds):
-        return False
-
-class GroupInstallCommand(GroupCommand):
-    def getNames(self):
-        return ['groupinstall', 'groupupdate']
-
-    def getUsage(self):
-        return "GROUP..."
-
-    def getSummary(self):
-        return _("Install the packages in a group on your system")
-    
     def doCheck(self, base, basecmd, extcmds):
-        checkRootUID(base)
-        checkGPGKey(base)
-        checkGroupArg(base, basecmd, extcmds)
+        cmd, extcmds = self._grp_cmd(basecmd, extcmds)
+
+        checkEnabledRepo(base)
+
+        if cmd in ('install', 'remove',
+                   'mark-install', 'mark-remove',
+                   'mark-members', 'info', 'mark-members-sync'):
+            checkGroupArg(base, cmd, extcmds)
+
+        if cmd in ('install', 'remove', 'upgrade',
+                   'mark-install', 'mark-remove',
+                   'mark-members', 'mark-members-sync'):
+            checkRootUID(base)
+
+        if cmd in ('install', 'upgrade'):
+            checkGPGKey(base)
+
+        cmds = ('list', 'info', 'remove', 'install', 'upgrade', 'summary',
+                'mark-install', 'mark-remove',
+                'mark-members', 'mark-members-sync')
+        if cmd not in cmds:
+            base.logger.critical(_('Invalid groups sub-command, use: %s.'),
+                                 ", ".join(cmds))
+            raise cli.CliError
 
     def doCommand(self, base, basecmd, extcmds):
-        GroupCommand.doCommand(self, base, basecmd, extcmds)
+        cmd, extcmds = self._grp_cmd(basecmd, extcmds)
+
+        self._grp_setup_doCommand(base)
+        if cmd == 'summary':
+            return base.returnGroupSummary(extcmds)
+
+        if cmd == 'list':
+            return base.returnGroupLists(extcmds)
+
         try:
-            return base.installGroups(extcmds)
+            if cmd == 'info':
+                return base.returnGroupInfo(extcmds)
+            if cmd == 'install':
+                return base.installGroups(extcmds)
+            if cmd == 'upgrade':
+                return base.installGroups(extcmds, upgrade=True)
+            if cmd == 'remove':
+                return base.removeGroups(extcmds)
+
         except yum.Errors.YumBaseError, e:
             return 1, [str(e)]
 
-class GroupRemoveCommand(GroupCommand):
-    def getNames(self):
-        return ['groupremove', 'grouperase']
-
-    def getUsage(self):
-        return "GROUP..."
-
-    def getSummary(self):
-        return _("Remove the packages in a group from your system")
-
-    def doCheck(self, base, basecmd, extcmds):
-        checkRootUID(base)
-        checkGroupArg(base, basecmd, extcmds)
-
-    def doCommand(self, base, basecmd, extcmds):
-        GroupCommand.doCommand(self, base, basecmd, extcmds)
-        try:
-            return base.removeGroups(extcmds)
-        except yum.Errors.YumBaseError, e:
-            return 1, [str(e)]
 
     def needTs(self, base, basecmd, extcmds):
-        return False
+        cmd, extcmds = self._grp_cmd(basecmd, extcmds)
 
-    def needTsRemove(self, base, basecmd, extcmds):
+        if cmd in ('list', 'info', 'remove', 'summary'):
+            return False
         return True
 
-class GroupInfoCommand(GroupCommand):
-    def getNames(self):
-        return ['groupinfo']
+    def needTsRemove(self, base, basecmd, extcmds):
+        cmd, extcmds = self._grp_cmd(basecmd, extcmds)
 
-    def getUsage(self):
-        return "GROUP..."
-
-    def getSummary(self):
-        return _("Display details about a package group")
-
-    def doCheck(self, base, basecmd, extcmds):
-        checkGroupArg(base, basecmd, extcmds)
-
-    def doCommand(self, base, basecmd, extcmds):
-        GroupCommand.doCommand(self, base, basecmd, extcmds)
-        try:
-            return base.returnGroupInfo(extcmds)
-        except yum.Errors.YumBaseError, e:
-            return 1, [str(e)]
-
-    def needTs(self, base, basecmd, extcmds):
+        if cmd in ('remove',):
+           return True
         return False
 
 class MakeCacheCommand(YumCommand):
@@ -489,7 +554,7 @@ class MakeCacheCommand(YumCommand):
         return _("Generate the metadata cache")
 
     def doCheck(self, base, basecmd, extcmds):
-        pass
+        checkEnabledRepo(base)
 
     def doCommand(self, base, basecmd, extcmds):
         base.logger.debug(_("Making cache files for all metadata files."))
@@ -532,6 +597,7 @@ class CleanCommand(YumCommand):
 
     def doCheck(self, base, basecmd, extcmds):
         checkCleanArg(base, basecmd, extcmds)
+        checkEnabledRepo(base)
         
     def doCommand(self, base, basecmd, extcmds):
         base.conf.cache = 1
@@ -570,14 +636,18 @@ class CheckUpdateCommand(YumCommand):
     def getSummary(self):
         return _("Check for available package updates")
 
+    def doCheck(self, base, basecmd, extcmds):
+        checkEnabledRepo(base)
+
     def doCommand(self, base, basecmd, extcmds):
+        obscmds = ['obsoletes'] + extcmds
         base.extcmds.insert(0, 'updates')
         result = 0
         try:
             ypl = base.returnPkgLists(extcmds)
             if (base.conf.obsoletes or
                 base.verbose_logger.isEnabledFor(logginglevels.DEBUG_3)):
-                typl = base.returnPkgLists(['obsoletes'])
+                typl = base.returnPkgLists(obscmds)
                 ypl.obsoletes = typl.obsoletes
                 ypl.obsoletesTuples = typl.obsoletesTuples
 
@@ -635,7 +705,7 @@ class SearchCommand(YumCommand):
 
 class UpgradeCommand(YumCommand):
     def getNames(self):
-        return ['upgrade']
+        return ['upgrade', 'upgrade-to']
 
     def getUsage(self):
         return 'PACKAGE...'
@@ -646,16 +716,21 @@ class UpgradeCommand(YumCommand):
     def doCheck(self, base, basecmd, extcmds):
         checkRootUID(base)
         checkGPGKey(base)
+        checkEnabledRepo(base, extcmds)
 
     def doCommand(self, base, basecmd, extcmds):
         base.conf.obsoletes = 1
         self.doneCommand(base, _("Setting up Upgrade Process"))
         try:
-            return base.updatePkgs(extcmds)
+            return base.updatePkgs(extcmds, update_to=(basecmd == 'upgrade-to'))
         except yum.Errors.YumBaseError, e:
             return 1, [str(e)]
 
 class LocalInstallCommand(YumCommand):
+    def __init__(self):
+        YumCommand.__init__(self)
+        self.hidden = True
+
     def getNames(self):
         return ['localinstall', 'localupdate']
 
@@ -912,6 +987,12 @@ class RepoListCommand(YumCommand):
                     elif repo.mirrorlist:
                         out += [base.fmtKeyValFill(_("Repo-mirrors : "),
                                                    repo.mirrorlist)]
+                    if enabled and repo.urls and not baseurls:
+                        url = repo.urls[0]
+                        if len(repo.urls) > 1:
+                            url += ' (%d more)' % (len(repo.urls) - 1)
+                        out += [base.fmtKeyValFill(_("Repo-baseurl : "),
+                                                   url)]
 
                     if not os.path.exists(repo.metadata_cookie):
                         last = _("Unknown")
@@ -940,6 +1021,10 @@ class RepoListCommand(YumCommand):
                     if ui_excludes_num:
                         out += [base.fmtKeyValFill(_("Repo-excluded: "),
                                                    ui_excludes_num)]
+
+                    if repo.repofile:
+                        out += [base.fmtKeyValFill(_("Repo-filename: "),
+                                                   repo.repofile)]
 
                     base.verbose_logger.log(logginglevels.DEBUG_3,
                                             "%s\n",
@@ -980,14 +1065,14 @@ class RepoListCommand(YumCommand):
             txt_rid  = utf8_width_fill(_('repo id'), id_len)
             txt_rnam = utf8_width_fill(_('repo name'), nm_len, nm_len)
             if arg == 'disabled': # Don't output a status column.
-                base.verbose_logger.log(logginglevels.INFO_2,"%s %s",
+                base.verbose_logger.info("%s %s",
                                         txt_rid, txt_rnam)
             else:
-                base.verbose_logger.log(logginglevels.INFO_2,"%s %s %s",
+                base.verbose_logger.info("%s %s %s",
                                         txt_rid, txt_rnam, _('status'))
             for (rid, rname, (ui_enabled, ui_endis_wid), ui_num) in cols:
                 if arg == 'disabled': # Don't output a status column.
-                    base.verbose_logger.log(logginglevels.INFO_2, "%s %s",
+                    base.verbose_logger.info("%s %s",
                                             utf8_width_fill(rid, id_len),
                                             utf8_width_fill(rname, nm_len,
                                                             nm_len))
@@ -995,7 +1080,7 @@ class RepoListCommand(YumCommand):
 
                 if ui_num:
                     ui_num = utf8_width_fill(ui_num, ui_len, left=False)
-                base.verbose_logger.log(logginglevels.INFO_2, "%s %s %s%s",
+                base.verbose_logger.info("%s %s %s%s",
                                         utf8_width_fill(rid, id_len),
                                         utf8_width_fill(rname, nm_len, nm_len),
                                         ui_enabled, ui_num)
@@ -1064,8 +1149,7 @@ class HelpCommand(YumCommand):
     def doCommand(self, base, basecmd, extcmds):
         if extcmds[0] in base.yum_cli_commands:
             command = base.yum_cli_commands[extcmds[0]]
-            base.verbose_logger.log(logginglevels.INFO_2,
-                    self._makeOutput(command))
+            base.verbose_logger.info(self._makeOutput(command))
         return 0, []
 
     def needTs(self, base, basecmd, extcmds):
@@ -1082,6 +1166,7 @@ class ReInstallCommand(YumCommand):
         checkRootUID(base)
         checkGPGKey(base)
         checkPackageArg(base, basecmd, extcmds)
+        checkEnabledRepo(base, extcmds)
 
     def doCommand(self, base, basecmd, extcmds):
         self.doneCommand(base, _("Setting up Reinstall Process"))
@@ -1108,6 +1193,7 @@ class DowngradeCommand(YumCommand):
         checkRootUID(base)
         checkGPGKey(base)
         checkPackageArg(base, basecmd, extcmds)
+        checkEnabledRepo(base, extcmds)
 
     def doCommand(self, base, basecmd, extcmds):
         self.doneCommand(base, _("Setting up Downgrade Process"))
@@ -1207,7 +1293,7 @@ class VersionCommand(YumCommand):
                 lastdbv = base.history.last()
                 if lastdbv is not None:
                     lastdbv = lastdbv.end_rpmdbversion
-                if lastdbv is None or data[0] != lastdbv:
+                if lastdbv is not None and data[0] != lastdbv:
                     base._rpmdb_warn_checks(warn=lastdbv is not None)
                 if vcmd not in ('group-installed', 'group-all'):
                     cols.append(("%s %s/%s" % (_("Installed:"), rel, ba),
@@ -1215,6 +1301,9 @@ class VersionCommand(YumCommand):
                     _append_repos(cols, data[1])
                 if groups:
                     for grp in sorted(data[2]):
+                        if (vcmd.startswith("group-") and
+                            len(extcmds) > 1 and grp not in extcmds[1:]):
+                            continue
                         cols.append(("%s %s" % (_("Group-Installed:"), grp),
                                      str(data[2][grp])))
                         _append_repos(cols, data[3][grp])
@@ -1230,6 +1319,9 @@ class VersionCommand(YumCommand):
                         _append_repos(cols, data[1])
                 if groups:
                     for grp in sorted(data[2]):
+                        if (vcmd.startswith("group-") and
+                            len(extcmds) > 1 and grp not in extcmds[1:]):
+                            continue
                         cols.append(("%s %s" % (_("Group-Available:"), grp),
                                      str(data[2][grp])))
                         if verbose:
@@ -1266,7 +1358,7 @@ class HistoryCommand(YumCommand):
         return ['history']
 
     def getUsage(self):
-        return "[info|list|summary|redo|undo|new]"
+        return "[info|list|packages-list|summary|addon-info|redo|undo|rollback|new]"
 
     def getSummary(self):
         return _("Display, or use, the transaction history")
@@ -1291,18 +1383,65 @@ class HistoryCommand(YumCommand):
         if base.history_undo(old):
             return 2, ["Undoing transaction %u" % (old.tid,)]
 
+    def _hcmd_rollback(self, base, extcmds):
+        force = False
+        if len(extcmds) > 1 and extcmds[1] == 'force':
+            force = True
+            extcmds = extcmds[:]
+            extcmds.pop(0)
+
+        old = base._history_get_transaction(extcmds)
+        if old is None:
+            return 1, ['Failed history rollback, no transaction']
+        last = base.history.last()
+        if last is None:
+            return 1, ['Failed history rollback, no last?']
+        if old.tid == last.tid:
+            return 0, ['Rollback to current, nothing to do']
+
+        mobj = None
+        for tid in base.history.old(range(old.tid + 1, last.tid + 1)):
+            if not force and (tid.altered_lt_rpmdb or tid.altered_gt_rpmdb):
+                if tid.altered_lt_rpmdb:
+                    msg = "Transaction history is incomplete, before %u."
+                else:
+                    msg = "Transaction history is incomplete, after %u."
+                print msg % tid.tid
+                print " You can use 'history rollback force', to try anyway."
+                return 1, ['Failed history rollback, incomplete']
+
+            if mobj is None:
+                mobj = yum.history.YumMergedHistoryTransaction(tid)
+            else:
+                mobj.merge(tid)
+
+        tm = time.ctime(old.beg_timestamp)
+        print "Rollback to transaction %u, from %s" % (old.tid, tm)
+        print base.fmtKeyValFill("  Undoing the following transactions: ",
+                                 ", ".join((str(x) for x in mobj.tid)))
+        base.historyInfoCmdPkgsAltered(mobj)
+        if base.history_undo(mobj):
+            return 2, ["Rollback to transaction %u" % (old.tid,)]
+
     def _hcmd_new(self, base, extcmds):
         base.history._create_db_file()
 
     def doCheck(self, base, basecmd, extcmds):
-        cmds = ('list', 'info', 'summary', 'repeat', 'redo', 'undo', 'new')
+        cmds = ('list', 'info', 'summary', 'repeat', 'redo', 'undo', 'new',
+                'rollback',
+                'addon', 'addon-info',
+                'pkg', 'pkgs', 'pkg-list', 'pkgs-list',
+                'package', 'package-list', 'packages', 'packages-list')
         if extcmds and extcmds[0] not in cmds:
             base.logger.critical(_('Invalid history sub-command, use: %s.'),
                                  ", ".join(cmds))
             raise cli.CliError
-        if extcmds and extcmds[0] in ('repeat', 'redo', 'undo', 'new'):
+        if extcmds and extcmds[0] in ('repeat', 'redo', 'undo', 'rollback', 'new'):
             checkRootUID(base)
             checkGPGKey(base)
+        elif not os.access(base.history._db_file, os.R_OK):
+            base.logger.critical(_("You don't have access to the history DB."))
+            raise cli.CliError
 
     def doCommand(self, base, basecmd, extcmds):
         vcmd = 'list'
@@ -1316,10 +1455,17 @@ class HistoryCommand(YumCommand):
             ret = base.historyInfoCmd(extcmds)
         elif vcmd == 'summary':
             ret = base.historySummaryCmd(extcmds)
+        elif vcmd in ('addon', 'addon-info'):
+            ret = base.historyAddonInfoCmd(extcmds)
+        elif vcmd in ('pkg', 'pkgs', 'pkg-list', 'pkgs-list',
+                      'package', 'package-list', 'packages', 'packages-list'):
+            ret = base.historyPackageListCmd(extcmds)
         elif vcmd == 'undo':
             ret = self._hcmd_undo(base, extcmds)
         elif vcmd in ('redo', 'repeat'):
             ret = self._hcmd_redo(base, extcmds)
+        elif vcmd == 'rollback':
+            ret = self._hcmd_rollback(base, extcmds)
         elif vcmd == 'new':
             ret = self._hcmd_new(base, extcmds)
 
@@ -1331,7 +1477,7 @@ class HistoryCommand(YumCommand):
         vcmd = 'list'
         if extcmds:
             vcmd = extcmds[0]
-        return vcmd in ('repeat', 'redo', 'undo')
+        return vcmd in ('repeat', 'redo', 'undo', 'rollback')
 
 
 class CheckRpmdbCommand(YumCommand):
@@ -1347,16 +1493,45 @@ class CheckRpmdbCommand(YumCommand):
     def doCommand(self, base, basecmd, extcmds):
         chkcmd = 'all'
         if extcmds:
-            chkcmd = extcmds[0]
+            chkcmd = extcmds
 
         def _out(x):
-            print x
+            print to_unicode(x.__str__())
 
         rc = 0
-        if base._rpmdb_warn_checks(_out, False, chkcmd):
+        if base._rpmdb_warn_checks(out=_out, warn=False, chkcmd=chkcmd,
+                                   header=lambda x: None):
             rc = 1
         return rc, ['%s %s' % (basecmd, chkcmd)]
 
     def needTs(self, base, basecmd, extcmds):
         return False
+
+class LoadTransactionCommand(YumCommand):
+    def getNames(self):
+        return ['load-transaction', 'load-ts']
+
+    def getUsage(self):
+        return "filename"
+
+    def getSummary(self):
+        return _("load a saved transaction from filename")
+
+    def doCommand(self, base, basecmd, extcmds):
+        if not extcmds:
+            base.logger.critical(_("No saved transaction file specified."))
+            raise cli.CliError
+        
+        load_file = extcmds[0]
+        self.doneCommand(base, _("loading transaction from %s") % load_file)
+        
+        try:
+            base.load_ts(load_file)
+        except yum.Errors.YumBaseError, e:
+            return 1, [to_unicode(e)]
+        return 2, [_('Transaction loaded from %s with %s members') % (load_file, len(base.tsInfo.getMembers()))]
+
+
+    def needTs(self, base, basecmd, extcmds):
+        return True
 

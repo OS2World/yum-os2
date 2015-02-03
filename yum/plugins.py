@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -89,13 +90,19 @@ SLOT_TO_CONDUIT = {
     'clean': 'PluginConduit',
     'pretrans': 'MainPluginConduit',
     'posttrans': 'MainPluginConduit',
+    'preverifytrans': 'MainPluginConduit',
+    'postverifytrans': 'MainPluginConduit',
     'exclude': 'MainPluginConduit',
     'preresolve': 'DepsolvePluginConduit',
     'postresolve': 'DepsolvePluginConduit',
+    'historybegin': 'HistoryPluginConduit',
+    'historyend': 'HistoryPluginConduit',
+    'compare_providers': 'CompareProvidersPluginConduit',
+    'verify_package': 'VerifyPluginConduit',
     }
 
 # Enumerate all slot names
-SLOTS = SLOT_TO_CONDUIT.keys()
+SLOTS = sorted(SLOT_TO_CONDUIT.keys())
 
 class PluginYumExit(Exception):
     '''Used by plugins to signal that yum should stop
@@ -606,6 +613,21 @@ class DepsolvePluginConduit(MainPluginConduit):
         self.resultcode = rescode
         self.resultstring = restring
 
+class CompareProvidersPluginConduit(MainPluginConduit):
+    def __init__(self, parent, base, conf, providers_dict={}, reqpo=None):
+        MainPluginConduit.__init__(self, parent, base, conf)
+        self.packages = providers_dict
+        self.reqpo = reqpo
+
+class HistoryPluginConduit(MainPluginConduit):
+    def __init__(self, parent, base, conf, rescode=None, restring=[]):
+        MainPluginConduit.__init__(self, parent, base, conf)
+        self.history = self._base.history
+
+class VerifyPluginConduit(MainPluginConduit):
+    def __init__(self, parent, base, conf, verify_package):
+        MainPluginConduit.__init__(self, parent, base, conf)
+        self.verify_package = verify_package
 
 def parsever(apiver):
     maj, min = apiver.split('.')

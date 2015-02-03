@@ -22,18 +22,13 @@ ts = None
 class TransactionWrapper:
     def __init__(self, root='/'):
         self.ts = rpm.TransactionSet(root)
-        self._methods = ['dbMatch',
-                         'check',
+        self._methods = ['check',
                          'order',
                          'addErase',
                          'addInstall',
                          'run',
-                         'IDTXload',
-                         'IDTXglob',
-                         'rollback',
                          'pgpImportPubkey',
                          'pgpPrtPkts',
-                         'Debug',
                          'problems',
                          'setFlags',
                          'setVSFlags',
@@ -53,6 +48,17 @@ class TransactionWrapper:
             self.ts.closeDB()
             self.ts = None
             self.open = False
+
+    def dbMatch(self, *args, **kwds):
+        if 'patterns' in kwds:
+            patterns = kwds.pop('patterns')
+        else:
+            patterns = []
+
+        mi = self.ts.dbMatch(*args, **kwds)
+        for (tag, tp, pat) in patterns:
+            mi.pattern(tag, tp, pat)
+        return mi
 
     def __getattr__(self, attr):
         if attr in self._methods:
@@ -83,6 +89,18 @@ class TransactionWrapper:
         curflags = self.ts.setFlags(0)
         self.ts.setFlags(curflags | flag)
 
+    def getTsFlags(self):
+        curflags = self.ts.setFlags(0)
+        self.ts.setFlags(curflags)
+        return curflags
+    
+    def isTsFlagSet(self, flag):
+        val = self.getTsFlags()
+        return bool(flag & val)
+
+    def setScriptFd(self, fd):
+        self.ts.scriptFd = fd.fileno()
+        
 #    def addProblemFilter(self, filt):
 #        curfilter = self.ts.setProbFilter(0)
 #        self.ts.setProbFilter(cutfilter | filt)    
@@ -91,13 +109,14 @@ class TransactionWrapper:
         """tests the ts we've setup, takes a callback function and a conf dict 
            for flags and what not"""
     
+        origflags = self.getTsFlags()
         self.addTsFlag(rpm.RPMTRANS_FLAG_TEST)
         # FIXME GARBAGE - remove once this is reimplemented elsehwere
         # KEEPING FOR API COMPLIANCE ONLY
-        if conf.has_key('diskspacecheck'):
-            if conf['diskspacecheck'] == 0:
-                self.ts.setProbFilter(rpm.RPMPROB_FILTER_DISKSPACE)
+        if conf.get('diskspacecheck') == 0:
+            self.ts.setProbFilter(rpm.RPMPROB_FILTER_DISKSPACE)
         tserrors = self.ts.run(cb.callback, '')
+        self.ts.setFlags(origflags)
     
         reserrors = []
         if tserrors:
@@ -151,7 +170,7 @@ class TransactionWrapper:
             preq = 0
             tup = miscutils.pkgTupleFromHeader(h)
             for p in _return_all_provides(h):
-                if req.has_key(p):
+                if p in req:
                     # Don't count a package that provides its require
                     s = req[p]
                     if len(s) > 1 or tup not in s:

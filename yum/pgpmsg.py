@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 ##Copyright (C) 2003,2005,2009  Jens B. Jorgensen <jbj1@ultraemail.net>
 ##
 ##This program is free software; you can redistribute it and/or
@@ -18,6 +19,11 @@ import struct, time, cStringIO, base64, types
 #  We use this so that we can work on python-2.4 and python-2.6, and thus.
 # use import md5/import sha on the older one and import hashlib on the newer.
 #  Stupid deprecation warnings.
+
+# pylint: disable-msg=W0108 
+# Ignore :W0108: *Lambda may not be necessary*
+
+
 try:
     import hashlib
 except ImportError:
@@ -302,7 +308,7 @@ REVOKE_KEY_CLASS_SENS = 0x40 # sensitive
 PGP_FEATURE_1_MOD_DETECT = 0x01 # Modification detection
 
 pgp_feature_to_str = {
-    PGP_FEATURE_1_MOD_DETECT : 'Modification Detectiobn'
+    PGP_FEATURE_1_MOD_DETECT : 'Modification Detection'
 }
 
 def get_whole_number(msg, idx, numlen) :
@@ -399,7 +405,7 @@ def map_to_str(m, vals) :
     if type(vals) != types.ListType and type(vals) != types.TupleType :
         vals = list((vals,))
     for i in vals :
-        if m.has_key(i) :
+        if i in m :
             slist.append(m[i])
         else :
             slist.append('unknown(' + str(i) + ')')
@@ -781,11 +787,9 @@ class signature(pgp_packet) :
         if sp[0] == SIG_SUB_TYPE_SGNR_USER_ID : # signer's user id
             return 'signer id: ' + sp[1]
         if sp[0] == SIG_SUB_TYPE_REVOKE_REASON : # reason for revocation
-            reas = ''
-            if revoke_reason_to_str.has_key(sp[1]) :
-                reas = revoke_reason_to_str[sp[1]]
+            reas = revoke_reason_to_str.get(sp[1], '')
             return 'reason for revocation: %s, %s' % (reas, sp[2])
-        if sp[0] == SIG_SUB_TYPE_FEATURES : # featues
+        if sp[0] == SIG_SUB_TYPE_FEATURES : # features
             features = []
             if len(sp) > 1 :
                 val = sp[1]
@@ -1073,7 +1077,7 @@ be scanned to make sure they are valid for a pgp certificate."""
                     if pkt_idx >= len(pkts) :
                         raise ValueError('subkey at index %d was not followed by a signature' % (pkt_idx-1))
                     if pkts[pkt_idx].pkt_typ != CTB_PKT_SIG or pkts[pkt_idx].sig_type != SIG_TYPE_SUBKEY_BIND :
-                            raise ValueError('signature %d doesn\'t bind subkey to key, type is %s' % (pkt_idx, map_to_str(sig_type_to_str, pkts[pkt_idx].sig_typ)))
+                        raise ValueError('signature %d doesn\'t bind subkey to key, type is %s' % (pkt_idx, map_to_str(sig_type_to_str, pkts[pkt_idx].sig_typ)))
                     subkey.append(pkts[pkt_idx])
 
                     pkt_idx = pkt_idx + 1
@@ -1183,7 +1187,7 @@ def decode(msg) :
         idx = idx + pkt_len
     return pkt_list
 
-def decode_msg(msg) :
+def decode_msg(msg, multi=False) :
     """decode_msg(msg) ==> list of OpenPGP "packet" objects
 Takes an ascii-armored PGP block and returns a list of objects each of which
 corresponds to a PGP "packets".
@@ -1214,7 +1218,7 @@ a PGP "certificate" includes a public key, user id(s), and signature.
             continue
         
         # are we at the checksum line?
-        if l[0] == '=' :
+        if l and l[0] == '=' :
             # get the checksum number
             csum = base64.decodestring(l[1:5])
             i = 0
@@ -1239,11 +1243,17 @@ a PGP "certificate" includes a public key, user id(s), and signature.
                 pkt_idx = cert.load(pkt_list)
                 cert_list.append(cert)
                 pkt_list[0:pkt_idx] = []
+            if not multi:
+                if not cert_list:
+                    return None
+                return cert_list[0]
             return cert_list
         
         # add the data to our buffer then
         block_buf.write(l)
 
+    if not multi:
+        return None
     return []
 
 def decode_multiple_keys(msg):
@@ -1263,7 +1273,7 @@ def decode_multiple_keys(msg):
         block += '%s\n' % l
         if l == '-----END PGP PUBLIC KEY BLOCK-----':
             in_block = 0
-            thesecerts = decode_msg(block)
+            thesecerts = decode_msg(block, multi=True)
             if thesecerts:
                 certs.extend(thesecerts)
             block = ''

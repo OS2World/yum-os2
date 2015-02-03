@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 """
 Assorted utility functions for yum.
 """
@@ -19,6 +20,14 @@ import pwd
 import fnmatch
 import bz2
 import gzip
+import shutil
+_available_compression = ['gz', 'bz2']
+try:
+    import lzma
+    _available_compression.append('xz')
+except ImportError:
+    lzma = None
+
 from rpmUtils.miscutils import stringToVersion, flagToString
 from stat import *
 try:
@@ -28,7 +37,7 @@ except ImportError:
     gpgme = None
 try:
     import hashlib
-    _available_checksums = set(['md5', 'sha1', 'sha256', 'sha512'])
+    _available_checksums = set(['md5', 'sha1', 'sha256', 'sha384', 'sha512'])
     _default_checksums = ['sha256']
 except ImportError:
     # Python-2.4.z ... gah!
@@ -98,17 +107,16 @@ def re_filename(s):
 def re_primary_filename(filename):
     """ Tests if a filename string, can be matched against just primary.
         Note that this can produce false negatives (but not false
-        positives). """
-    if 'bin/' in filename:
-        return True
-    if filename.startswith('/etc/'):
+        positives). Note that this is a superset of re_primary_dirname(). """
+    if re_primary_dirname(filename):
         return True
     if filename == '/usr/lib/sendmail':
         return True
     return False
 
 def re_primary_dirname(dirname):
-    """ Tests if a dirname string, can be matched against just primary. """
+    """ Tests if a dirname string, can be matched against just primary. Note
+        that this is a subset of re_primary_filename(). """
     if 'bin/' in dirname:
         return True
     if dirname.startswith('/etc/'):
@@ -244,6 +252,9 @@ class Checksums:
     def __len__(self):
         return self._len
 
+    # Note that len(x) is assert limited to INT_MAX, which is 2GB on i686.
+    length = property(fget=lambda self: self._len)
+
     def update(self, data):
         self._len += len(data)
         for sumalgo in self._sumalgos:
@@ -315,7 +326,7 @@ def checksum(sumtype, file, CHUNK=2**16, datasize=None):
 
         data = Checksums([sumtype])
         while data.read(fo, CHUNK):
-            if datasize is not None and len(data) > datasize:
+            if datasize is not None and data.length > datasize:
                 break
 
         if type(file) is types.StringType:
@@ -324,7 +335,7 @@ def checksum(sumtype, file, CHUNK=2**16, datasize=None):
             
         # This screws up the length, but that shouldn't matter. We only care
         # if this checksum == what we expect.
-        if datasize is not None and datasize != len(data):
+        if datasize is not None and datasize != data.length:
             return '!%u!%s' % (datasize, data.hexdigest(sumtype))
 
         return data.hexdigest(sumtype)
@@ -424,6 +435,8 @@ def getgpgkeyinfo(rawkey, multiple=False):
             'timestamp': key.public_key.timestamp,
             'fingerprint' : key.public_key.fingerprint,
             'raw_key' : key.raw_key,
+            'has_sig' : False,
+            'valid_sig': False,
         }
 
         # Retrieve the timestamp from the matching signature packet 
@@ -487,7 +500,7 @@ def keyInstalled(ts, keyid, timestamp):
 
     return -1
 
-def import_key_to_pubring(rawkey, keyid, cachedir=None, gpgdir=None):
+def import_key_to_pubring(rawkey, keyid, cachedir=None, gpgdir=None, make_ro_copy=True):
     # FIXME - cachedir can be removed from this method when we break api
     if gpgme is None:
         return False
@@ -510,6 +523,30 @@ def import_key_to_pubring(rawkey, keyid, cachedir=None, gpgdir=None):
     # ultimately trust the key or pygpgme is definitionally stupid
     k = ctx.get_key(keyid)
     gpgme.editutil.edit_trust(ctx, k, gpgme.VALIDITY_ULTIMATE)
+    
+    if make_ro_copy:
+
+        rodir = gpgdir + '-ro'
+        if not os.path.exists(rodir):
+            os.makedirs(rodir, mode=0755)
+            for f in glob.glob(gpgdir + '/*'):
+                basename = os.path.basename(f)
+                ro_f = rodir + '/' + basename
+                shutil.copy(f, ro_f)
+                os.chmod(ro_f, 0755)
+            fp = open(rodir + '/gpg.conf', 'w', 0755)
+            # yes it is this stupid, why do you ask?
+            opts="""lock-never    
+no-auto-check-trustdb    
+trust-model direct
+no-expensive-trust-checks
+no-permission-warning         
+preserve-permissions
+"""
+            fp.write(opts)
+            fp.close()
+
+        
     return True
     
 def return_keyids_from_pubring(gpgdir):
@@ -532,11 +569,19 @@ def valid_detached_sig(sig_file, signed_file, gpghome=None):
     if gpgme is None:
         return False
 
-    if gpghome and os.path.exists(gpghome):
+    if gpghome:
+        if not os.path.exists(gpghome):
+            return False
         os.environ['GNUPGHOME'] = gpghome
 
-    sig = open(sig_file, 'r')
-    signed_text = open(signed_file, 'r')
+    if hasattr(sig_file, 'read'):
+        sig = sig_file
+    else:
+        sig = open(sig_file, 'r')
+    if hasattr(signed_file, 'read'):
+        signed_text = signed_file
+    else:
+        signed_text = open(signed_file, 'r')
     plaintext = None
     ctx = gpgme.Context()
 
@@ -545,6 +590,8 @@ def valid_detached_sig(sig_file, signed_file, gpghome=None):
     except gpgme.GpgmeError, e:
         return False
     else:
+        if not sigs:
+            return False
         # is there ever a case where we care about a sig beyond the first one?
         thissig = sigs[0]
         if not thissig:
@@ -556,7 +603,7 @@ def valid_detached_sig(sig_file, signed_file, gpghome=None):
 
     return False
 
-def getCacheDir(tmpdir='/var/tmp', reuse=True):
+def getCacheDir(tmpdir='/var/tmp', reuse=True, prefix='yum-'):
     """return a path to a valid and safe cachedir - only used when not running
        as root or when --tempcache is set"""
     
@@ -567,11 +614,9 @@ def getCacheDir(tmpdir='/var/tmp', reuse=True):
     except KeyError:
         return None # if it returns None then, well, it's bollocksed
 
-    prefix = 'yum-'
-
     if reuse:
         # check for /var/tmp/yum-username-* - 
-        prefix = 'yum-%s-' % username    
+        prefix = '%s%s-' % (prefix, username)
         dirpath = '%s/%s*' % (tmpdir, prefix)
         cachedirs = sorted(glob.glob(dirpath))
         for thisdir in cachedirs:
@@ -642,7 +687,9 @@ def string_to_prco_tuple(prcoString):
         n = prcoString
         f = v = None
         
-        if n[0] != '/':
+        # We love GPG keys as packages, esp. awesome provides like:
+        #  gpg(Fedora (13) <fedora@fedoraproject.org>)
+        if n[0] != '/' and not n.startswith("gpg("):
             # not a file dep - look at it for being versioned
             prco_split = n.split()
             if len(prco_split) == 3:
@@ -676,10 +723,22 @@ def refineSearchPattern(arg):
         restring = re.escape(arg)
         
     return restring
+
+
+def _decompress_chunked(source, dest, ztype):
+
+    if ztype not in _available_compression:
+        msg = "%s compression not available" % ztype
+        raise Errors.MiscError, msg
     
-def bunzipFile(source,dest):
-    """ Extract the bzipped contents of source to dest. """
-    s_fn = bz2.BZ2File(source, 'r')
+    if ztype == 'bz2':
+        s_fn = bz2.BZ2File(source, 'r')
+    elif ztype == 'xz':
+        s_fn = lzma.LZMAFile(source, 'r')
+    elif ztype == 'gz':
+        s_fn = gzip.GzipFile(source, 'r')
+    
+    
     destination = open(dest, 'w')
 
     while True:
@@ -698,7 +757,11 @@ def bunzipFile(source,dest):
     
     destination.close()
     s_fn.close()
-
+    
+def bunzipFile(source,dest):
+    """ Extract the bzipped contents of source to dest. """
+    _decompress_chunked(source, dest, ztype='bz2')
+    
 def get_running_kernel_pkgtup(ts):
     """This takes the output of uname and figures out the pkgtup of the running
        kernel (name, arch, epoch, version, release)."""
@@ -782,7 +845,11 @@ def find_ts_remaining(timestamp, yumlibpath='/var/lib/yum'):
         item = item.replace('\n', '')
         if item == '':
             continue
-        (action, pkgspec) = item.split()
+        try:
+            (action, pkgspec) = item.split()
+        except ValueError, e:
+            msg = "Transaction journal  file %s is corrupt." % (tsallpath)
+            raise Errors.MiscError, msg
         to_complete_items.append((action, pkgspec))
     
     return to_complete_items
@@ -848,15 +915,20 @@ def _ugly_utf8_string_hack(item):
             newitem = newitem + char
     return newitem
 
+__cached_saxutils = None
 def to_xml(item, attrib=False):
-    import xml.sax.saxutils
+    global __cached_saxutils
+    if __cached_saxutils is None:
+        import xml.sax.saxutils
+        __cached_saxutils = xml.sax.saxutils
+
     item = _ugly_utf8_string_hack(item)
     item = to_utf8(item)
     item = item.rstrip()
     if attrib:
-        item = xml.sax.saxutils.escape(item, entities={'"':"&quot;"})
+        item = __cached_saxutils.escape(item, entities={'"':"&quot;"})
     else:
-        item = xml.sax.saxutils.escape(item)
+        item = __cached_saxutils.escape(item)
     return item
 
 def unlink_f(filename):
@@ -868,7 +940,16 @@ def unlink_f(filename):
         if e.errno != errno.ENOENT:
             raise
 
-def getloginuid():
+def stat_f(filename):
+    """ Call os.stat(), but don't die if the file isn't there. Returns None. """
+    try:
+        return os.stat(filename)
+    except OSError, e:
+        if e.errno not in (errno.ENOENT, errno.ENOTDIR):
+            raise
+        return None
+
+def _getloginuid():
     """ Get the audit-uid/login-uid, if available. None is returned if there
         was a problem. Note that no caching is done here. """
     #  We might normally call audit.audit_getloginuid(), except that requires
@@ -882,6 +963,16 @@ def getloginuid():
         return int(data)
     except ValueError:
         return None
+
+_cached_getloginuid = None
+def getloginuid():
+    """ Get the audit-uid/login-uid, if available. None is returned if there
+        was a problem. The value is cached, so you don't have to save it. """
+    global _cached_getloginuid
+    if _cached_getloginuid is None:
+        _cached_getloginuid = _getloginuid()
+    return _cached_getloginuid
+
 
 # ---------- i18n ----------
 import locale
@@ -907,7 +998,11 @@ def setup_locale(override_codecs=True, override_time=False):
 
 
 def get_my_lang_code():
-    mylang = locale.getlocale(locale.LC_MESSAGES)
+    try:
+        mylang = locale.getlocale(locale.LC_MESSAGES)
+    except ValueError, e:
+        # This is RHEL-5 python crack, Eg. en_IN can't be parsed properly
+        mylang = (None, None)
     if mylang == (None, None): # odd :)
         mylang = 'C'
     else:
@@ -983,27 +1078,100 @@ def get_uuid(savepath):
         
         return myid
         
-def decompress(filename):
+def decompress(filename, dest=None, fn_only=False, check_timestamps=False):
     """take a filename and decompress it into the same relative location.
        if the file is not compressed just return the file"""
-    out = filename
-    if filename.endswith('.gz'):
-        out = filename.replace('.gz', '')
-        decom = gzip.open(filename)
-        fo = open(out, 'w')
-        fo.write(decom.read())
-        fo.flush()
-        fo.close()
-        decom.close() 
-    elif filename.endswith('.bz') or filename.endswith('.bz2'):
-        if filename.endswith('.bz'):
-            out = filename.replace('.bz','')
-        else:
-            out = filename.replace('.bz2', '')
-        bunzipFile(filename, out)
-
-    #add magical lzma/xz trick here
     
+    out = dest
+    if not dest:
+        out = filename
+        
+    if filename.endswith('.gz'):
+        ztype='gz'
+        if not dest: 
+            out = filename.replace('.gz', '')
+
+    elif filename.endswith('.bz') or filename.endswith('.bz2'):
+        ztype='bz2'
+        if not dest:
+            if filename.endswith('.bz'):
+                out = filename.replace('.bz','')
+            else:
+                out = filename.replace('.bz2', '')
+    
+    elif filename.endswith('.xz'):
+        ztype='xz'
+        if not dest:
+            out = filename.replace('.xz', '')
+        
+    else:
+        out = filename # returning the same file since it is not compressed
+        ztype = None
+    
+    if ztype and not fn_only:
+        if check_timestamps:
+            fi = stat_f(filename)
+            fo = stat_f(out)
+            if fi and fo and fo.st_mtime > fi.st_mtime:
+                return out
+
+        _decompress_chunked(filename, out, ztype)
+        
     return out
     
+def repo_gen_decompress(filename, generated_name, cached=False):
+    """ This is a wrapper around decompress, where we work out a cached
+        generated name, and use check_timestamps. filename _must_ be from
+        a repo. and generated_name is the type of the file. """
+    dest = os.path.dirname(filename)
+    dest += '/gen'
+    if not os.path.exists(dest):
+        os.makedirs(dest, mode=0755)
+    dest += '/' + generated_name
+    return decompress(filename, dest=dest, check_timestamps=True,fn_only=cached)
     
+def read_in_items_from_dot_dir(thisglob, line_as_list=True):
+    """takes a glob of a dir (like /etc/foo.d/*.foo)
+       returns a list of all the lines in all the files matching
+       that glob, ignores comments and blank lines,
+       optional paramater 'line_as_list tells whether to
+       treat each line as a space or comma-separated list, defaults to True"""
+    results = []
+    for fname in glob.glob(thisglob):
+        for line in open(fname):
+            if re.match('\s*(#|$)', line):
+                continue
+            line = line.rstrip() # no more trailing \n's
+            line = line.lstrip() # be nice
+            if not line:
+                continue
+            if line_as_list:
+                line = line.replace('\n', ' ')
+                line = line.replace(',', ' ')
+                results.extend(line.split())
+                continue
+            results.append(line)
+    return results
+
+__cached_cElementTree = None
+def _cElementTree_import():
+    """ Importing xElementTree all the time, when we often don't need it, is a
+        huge timesink. This makes python -c 'import yum' suck. So we hide it
+        behind this function. And have accessors. """
+    global __cached_cElementTree
+    if __cached_cElementTree is None:
+        try:
+            from xml.etree import cElementTree
+        except ImportError:
+            import cElementTree
+        __cached_cElementTree = cElementTree
+
+def cElementTree_iterparse(filename):
+    """ Lazily load/run: cElementTree.iterparse """
+    _cElementTree_import()
+    return __cached_cElementTree.iterparse(filename)
+
+def cElementTree_xmlparse(filename):
+    """ Lazily load/run: cElementTree.parse """
+    _cElementTree_import()
+    return __cached_cElementTree.parse(filename)

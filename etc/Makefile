@@ -8,7 +8,9 @@ clean:
 
 install:
 	mkdir -p $(DESTDIR)/etc/yum/
+	mkdir -p $(DESTDIR)/etc/yum/protected.d
 	mkdir -p $(DESTDIR)/etc/yum/repos.d
+	mkdir -p $(DESTDIR)/etc/yum/vars
 
 	install -m 644 yum.conf $(YUMETC)/yum.conf
 
@@ -27,3 +29,10 @@ install:
 
 	mkdir -p $(DESTDIR)/etc/bash_completion.d
 	install -m 644 yum.bash $(DESTDIR)/etc/bash_completion.d
+	mkdir -p $(DESTDIR)/etc/cron.daily
+	mkdir -p $(DESTDIR)/etc/sysconfig/
+	install -D -m 755 0yum.cron $(DESTDIR)/etc/cron.daily/0yum.cron
+	install -D -m 755 yum-cron $(DESTDIR)/etc/rc.d/init.d/yum-cron
+	install -D -m 644 yum-daily.yum $(YUMETC)/yum-daily.yum
+	install -D -m 644 yum-weekly.yum $(YUMETC)/yum-weekly.yum
+	install -D -m 644 yum-cron.sysconf $(DESTDIR)/etc/sysconfig/yum-cron

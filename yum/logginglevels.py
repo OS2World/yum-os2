@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -45,7 +46,7 @@ logging.addLevelName(DEBUG_4, "DEBUG_4")
 __NO_LOGGING = 100
 logging.raiseExceptions = False
 
-import syslog as syslog_module
+from logging.handlers import SysLogHandler as syslog_module
 
 syslog = None
 
@@ -75,7 +76,7 @@ def syslogFacilityMap(facility):
     elif (facility.upper().startswith("LOG_") and
           facility[4:].upper() in _syslog_facility_map):
         return _syslog_facility_map[facility[4:].upper()]
-    return syslog.LOG_USER
+    return _syslog_facility_map["USER"]
 
 def logLevelFromErrorLevel(error_level):
     """ Convert an old-style error logging level to the new style. """
@@ -130,7 +131,10 @@ def doLoggingSetup(debuglevel, errorlevel,
     """
     global _added_handlers
 
-    logging.basicConfig()
+    #logging.basicConfig() # this appears to not change anything in our 
+    # logging setup - disabling this b/c of the behaviors in yum ticket 525
+    # -skvidal
+    
 
     if _added_handlers:
         if debuglevel is not None:
@@ -140,7 +144,6 @@ def doLoggingSetup(debuglevel, errorlevel,
         return
 
     plainformatter = logging.Formatter("%(message)s")
-    syslogformatter = logging.Formatter("yum: %(message)s")
     
     console_stdout = logging.StreamHandler(sys.stdout)
     console_stdout.setFormatter(plainformatter)
@@ -158,20 +161,24 @@ def doLoggingSetup(debuglevel, errorlevel,
     filelogger.setLevel(logging.INFO)
     filelogger.propagate = False
 
-    log_dev = syslog_device
     global syslog
-    if os.path.exists(log_dev):
-        try:
-            syslog = logging.handlers.SysLogHandler(log_dev)
-            syslog.setFormatter(syslogformatter)
-            filelogger.addHandler(syslog)
-            if syslog_ident is not None or syslog_facility is not None:
-                ident = syslog_ident    or ''
-                facil = syslog_facility or 'LOG_USER'
-                syslog_module.openlog(ident, 0, syslogFacilityMap(facil))
-        except socket.error:
-            if syslog is not None:
-                syslog.close()
+    if syslog_device:
+        address = None
+        if ":" in syslog_device:
+            address = syslog_device.rsplit(":", 1)
+            address = (address[0], int(address[1]))
+        elif os.path.exists(syslog_device):
+            address = syslog_device
+        if address:
+            try:
+                facil = syslogFacilityMap(syslog_facility or "USER")
+                syslog = logging.handlers.SysLogHandler(address, facil)
+            except socket.error:
+                if syslog is not None:
+                    syslog.close()
+            else:
+                setLoggingApp(syslog_ident or "yum")
+                filelogger.addHandler(syslog)
     _added_handlers = True
 
     if debuglevel is not None:
@@ -179,7 +186,7 @@ def doLoggingSetup(debuglevel, errorlevel,
     if errorlevel is not None:  
         setErrorLevel(errorlevel)
 
-def setFileLog(uid, logfile):
+def setFileLog(uid, logfile, cleanup=None):
     # TODO: When python's logging config parser doesn't blow up
     # when the user is non-root, put this in the config file.
     # syslog-style log
@@ -189,17 +196,24 @@ def setFileLog(uid, logfile):
             logdir = os.path.dirname(logfile)
             if not os.path.exists(logdir):
                 os.makedirs(logdir, mode=0755)
-
+            
+            if not os.path.exists(logfile):
+                f = open(logfile, 'w')
+                os.chmod(logfile, 0600) # making sure umask doesn't catch us up
+                f.close()
+                
             filelogger = logging.getLogger("yum.filelogging")
             filehandler = logging.FileHandler(logfile)
             formatter = logging.Formatter("%(asctime)s %(message)s",
                 "%b %d %H:%M:%S")
             filehandler.setFormatter(formatter)
             filelogger.addHandler(filehandler)
+            if not cleanup is None:
+                cleanup.append(lambda: filelogger.removeHandler(filehandler))
         except IOError:
             logging.getLogger("yum").critical('Cannot open logfile %s', logfile)
 
 def setLoggingApp(app):
     if syslog:
-        syslogformatter = logging.Formatter("yum(%s): "% (app,) + "%(message)s")
+        syslogformatter = logging.Formatter(app + "[%(process)d]: %(message)s")
         syslog.setFormatter(syslogformatter)

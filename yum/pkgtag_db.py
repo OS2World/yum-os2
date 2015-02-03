@@ -17,7 +17,7 @@
 
 # parse sqlite tag database
 # return pkgnames and tag that was matched
-from sqlutils import sqlite, executeSQL, sql_esc, sql_esc_glob
+from sqlutils import sqlite, executeSQL, sql_esc
 from Errors import PkgTagsError
 import sqlutils
 import sys
@@ -53,8 +53,14 @@ class PackageTagDB(object):
         # open it and leave a cursor in place for the db
         self._conn = sqlite.connect(sqlite_file)
         self.cur = self._conn.cursor()
-        self.count = self._sql_exec("select count(*) from packagetags",)
-        
+
+    def _getTagsCount(self):
+        ''' Unused, so no need to cache. '''
+        for n in self._sql_exec("select count(*) from packagetags",):
+            return n[0]
+
+    count = property(fget=lambda self: self._getTagsCount(),
+                     doc="Number of entries in the pkgtag DB")
         
     @catchSqliteException
     def _sql_exec(self, sql, *args):
@@ -82,7 +88,7 @@ class PackageTagDB(object):
         """Search by package name/glob.
            Return dict of dict[packagename] = [tag1, tag2, tag3, tag4, ...]"""
         res = {}
-        (name, esc) = sql_esc(tag)
+        (name, esc) = sql_esc(name)
         query = "SELECT name, tag, score FROM packagetags where name like ?%s " % esc
         name = '%' + name + '%' 
         rows = self._sql_exec(query, (name,))

@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -19,7 +20,6 @@ import time
 import types
 import urlparse
 urlparse.uses_fragment.append("media")
-import gzip
 
 import Errors
 from urlgrabber.grabber import URLGrabber
@@ -78,7 +78,7 @@ class YumPackageSack(packageSack.PackageSack):
         self.added = {}
 
     def addDict(self, repo, datatype, dataobj, callback=None):
-        if self.added.has_key(repo):
+        if repo in self.added:
             if datatype in self.added[repo]:
                 return
 
@@ -94,14 +94,14 @@ class YumPackageSack(packageSack.PackageSack):
                 self._addToDictAsList(self.pkgsByID, pkgid, po)
                 self.addPackage(po)
 
-            if not self.added.has_key(repo):
+            if repo not in self.added:
                 self.added[repo] = []
             self.added[repo].append('metadata')
             # indexes will need to be rebuilt
             self.indexesBuilt = 0
 
         elif datatype in ['filelists', 'otherdata']:
-            if self.added.has_key(repo):
+            if repo in self.added:
                 if 'metadata' not in self.added[repo]:
                     raise Errors.RepoError, '%s md for %s imported before primary' \
                            % (datatype, repo.id)
@@ -110,7 +110,7 @@ class YumPackageSack(packageSack.PackageSack):
                 current += 1
                 if callback: callback.progressbar(current, total, repo)
                 pkgdict = dataobj[pkgid]
-                if self.pkgsByID.has_key(pkgid):
+                if pkgid in self.pkgsByID:
                     for po in self.pkgsByID[pkgid]:
                         po.importFromDict(pkgdict)
 
@@ -134,7 +134,7 @@ class YumPackageSack(packageSack.PackageSack):
                 callback=callback,
                 )
         for item in data:
-            if self.added.has_key(repo):
+            if repo in self.added:
                 if item in self.added[repo]:
                     continue
 
@@ -163,7 +163,7 @@ class YumPackageSack(packageSack.PackageSack):
 
             if self._check_db_version(repo, mydbtype):
                 # see if we have the uncompressed db and check it's checksum vs the openchecksum
-                # if not download the bz2 file
+                # if not download the compressed file
                 # decompress it
                 # unlink it
 
@@ -171,9 +171,8 @@ class YumPackageSack(packageSack.PackageSack):
                 if not db_un_fn:
                     db_fn = repo._retrieveMD(mydbtype)
                     if db_fn:
-                        db_un_fn = db_fn.replace('.bz2', '')
                         if not repo.cache:
-                            misc.bunzipFile(db_fn, db_un_fn)
+                            db_un_fn = misc.decompress(db_fn)
                             misc.unlink_f(db_fn)
                             db_un_fn = self._check_uncompressed_db(repo, mydbtype)
 
@@ -199,8 +198,8 @@ class YumPackageSack(packageSack.PackageSack):
         mydbdata = repo.repoXML.getData(mdtype)
         (r_base, remote) = mydbdata.location
         fname = os.path.basename(remote)
-        bz2_fn = repo.cachedir + '/' + fname
-        db_un_fn = bz2_fn.replace('.bz2', '')
+        compressed_fn = repo.cachedir + '/' + fname
+        db_un_fn = misc.decompress(compressed_fn, fn_only=True)
 
         result = None
 
@@ -256,6 +255,7 @@ class YumRepository(Repository, config.RepoConf):
                                  # config is very, very old
         # throw in some stubs for things that will be set by the config class
         self.basecachedir = ""
+        self.base_persistdir = ""
         self.cost = 1000
         self.copy_local = 0
         # holder for stuff we've grabbed
@@ -274,6 +274,7 @@ class YumRepository(Repository, config.RepoConf):
 
         # callbacks for gpg key importing and confirmation
         self.gpg_import_func = None
+        self.gpgca_import_func = None
         self.confirm_func = None
 
         #  The reason we want to turn this off are things like repoids
@@ -369,7 +370,8 @@ class YumRepository(Repository, config.RepoConf):
         # we exclude all vars which start with _ or are in this list:
         excluded_vars = ('mediafunc', 'sack', 'metalink_data', 'grab', 
                          'grabfunc', 'repoXML', 'cfg', 'retrieved',
-                        'mirrorlistparsed', 'gpg_import_func', 'failure_obj',
+                        'mirrorlistparsed', 'gpg_import_func', 
+                        'gpgca_import_func', 'failure_obj',
                         'callback', 'confirm_func', 'groups_added', 
                         'interrupt_callback', 'id', 'mirror_failure_obj',
                         'repo_config_age', 'groupsfilename', 'copy_local', 
@@ -385,7 +387,7 @@ class YumRepository(Repository, config.RepoConf):
             if isinstance(getattr(self, attr), types.MethodType):
                 continue
             res = getattr(self, attr)
-            if not res:
+            if not res and type(res) not in (type(False), type(0)):
                 res = ''
             if type(res) == types.ListType:
                 res = ',\n   '.join(res)
@@ -428,9 +430,10 @@ class YumRepository(Repository, config.RepoConf):
 
         self._proxy_dict = {} # zap it
         proxy_string = None
-        if self.proxy not in [None, '_none_']:
+        empty = (None, '_none_', '')
+        if self.proxy not in empty:
             proxy_string = '%s' % self.proxy
-            if self.proxy_username is not None:
+            if self.proxy_username not in empty:
                 proxy_parsed = urlparse.urlsplit(self.proxy, allow_fragments=0)
                 proxy_proto = proxy_parsed[0]
                 proxy_host = proxy_parsed[1]
@@ -443,7 +446,7 @@ class YumRepository(Repository, config.RepoConf):
                 proxy_string = '%s://%s@%s%s' % (proxy_proto,
                         self.proxy_username, proxy_host, proxy_rest)
 
-                if self.proxy_password is not None:
+                if self.proxy_password not in empty:
                     proxy_string = '%s://%s:%s@%s%s' % (proxy_proto,
                               self.proxy_username, self.proxy_password,
                               proxy_host, proxy_rest)
@@ -503,6 +506,8 @@ class YumRepository(Repository, config.RepoConf):
                  'ssl_cert': self.sslclientcert,
                  'ssl_key': self.sslclientkey,
                  'user_agent': default_grabber.opts.user_agent,
+                 'username': self.username,
+                 'password': self.password,
                  }
         return opts
 
@@ -540,12 +545,18 @@ class YumRepository(Repository, config.RepoConf):
         """make the necessary dirs, if possible, raise on failure"""
 
         cachedir = os.path.join(self.basecachedir, self.id)
+        persistdir = os.path.join(self.base_persistdir, self.id)
         pkgdir = os.path.join(cachedir, 'packages')
         hdrdir = os.path.join(cachedir, 'headers')
         self.setAttribute('_dir_setup_cachedir', cachedir)
         self.setAttribute('_dir_setup_pkgdir', pkgdir)
         self.setAttribute('_dir_setup_hdrdir', hdrdir)
-        self.setAttribute('_dir_setup_gpgdir', self.cachedir + '/gpgdir')
+        self.setAttribute('_dir_setup_persistdir', persistdir)
+        ext=''
+        if os.geteuid() != 0:
+            ext = '-ro'
+        self.setAttribute('_dir_setup_gpgdir', persistdir + '/gpgdir' + ext)
+        self.setAttribute('_dir_setup_gpgcadir', persistdir + '/gpgcadir' + ext)
 
         cookie = self.cachedir + '/' + self.metadata_cookie_fn
         self.setAttribute('_dir_setup_metadata_cookie', cookie)
@@ -553,6 +564,14 @@ class YumRepository(Repository, config.RepoConf):
         for dir in [self.cachedir, self.pkgdir]:
             self._dirSetupMkdir_p(dir)
 
+        # persistdir is really root-only but try the make anyway and just
+        # catch the exception
+        for dir in [self.persistdir]:
+            try:
+                self._dirSetupMkdir_p(dir)
+            except Errors.RepoError, e:
+                pass
+                
         # if we're using a cachedir that's not the system one, copy over these
         # basic items from the system one
         self._preload_md_from_system_cache('repomd.xml')
@@ -582,12 +601,16 @@ class YumRepository(Repository, config.RepoConf):
             self._dirSetupMkdir_p(val)
         return ret
     cachedir = property(lambda self: self._dirGetAttr('cachedir'))
+    persistdir = property(lambda self: self._dirGetAttr('persistdir'))
+
     pkgdir   = property(lambda self: self._dirGetAttr('pkgdir'),
                         lambda self, x: self._dirSetAttr('pkgdir', x))
     hdrdir   = property(lambda self: self._dirGetAttr('hdrdir'),
                         lambda self, x: self._dirSetAttr('hdrdir', x))
     gpgdir   = property(lambda self: self._dirGetAttr('gpgdir'),
                         lambda self, x: self._dirSetAttr('gpgdir', x))
+    gpgcadir   = property(lambda self: self._dirGetAttr('gpgcadir'),  
+                        lambda self, x: self._dirSetAttr('gpgcadir', x))
     metadata_cookie = property(lambda self: self._dirGetAttr('metadata_cookie'))
 
     def baseurlSetup(self):
@@ -656,7 +679,12 @@ class YumRepository(Repository, config.RepoConf):
             url = parser.varReplace(url, self.yumvar)
             if url[-1] != '/':
                 url= url + '/'
-            (s,b,p,q,f,o) = urlparse.urlparse(url)
+            try:
+                # This started throwing ValueErrors, BZ 666826
+                (s,b,p,q,f,o) = urlparse.urlparse(url)
+            except (ValueError, IndexError, KeyError), e:
+                s = 'blah'
+
             if s not in ['http', 'ftp', 'file', 'https']:
                 skipped = url
                 continue
@@ -946,17 +974,19 @@ class YumRepository(Repository, config.RepoConf):
             fo.close()
             del fo
 
-    def setup(self, cache, mediafunc = None, gpg_import_func=None, confirm_func=None):
+    def setup(self, cache, mediafunc = None, gpg_import_func=None, confirm_func=None, gpgca_import_func=None):
         try:
             self.cache = cache
             self.mediafunc = mediafunc
             self.gpg_import_func = gpg_import_func
+            self.gpgca_import_func = gpgca_import_func
             self.confirm_func = confirm_func
         except Errors.RepoError, e:
             raise
         if not self.mediafunc and self.mediaid and not self.mirrorlist and not self.baseurl:
             verbose_logger.log(logginglevels.DEBUG_2, "Disabling media repo for non-media-aware frontend")
             self.enabled = False
+            self.skip_if_unavailable = True
 
     def _cachingRepoXML(self, local):
         """ Should we cache the current repomd.xml """
@@ -1038,6 +1068,14 @@ class YumRepository(Repository, config.RepoConf):
 
     def _revertOldRepoXML(self):
         """ If we have older data available, revert to it. """
+
+        #  If we can't do a timestamp check, then we can be looking at a
+        # completely different repo. from last time ... ergo. we can't revert.
+        #  We still want the old data, so we don't download twice. So we
+        # pretend everything is good until the revert.
+        if not self.timestamp_check:
+            raise Errors.RepoError, "Can't download or revert repomd.xml"
+
         if 'old_repo_XML' not in self._oldRepoMDData:
             self._oldRepoMDData = {}
             return
@@ -1082,16 +1120,14 @@ class YumRepository(Repository, config.RepoConf):
             self._check_db_version(mdtype + '_db', repoXML=repoXML)):
             mdtype += '_db'
 
-        if repoXML.repoData.has_key(mdtype):
-            return (mdtype, repoXML.getData(mdtype))
-        return (mdtype, None)
+        return (mdtype, repoXML.repoData.get(mdtype))
 
     def _get_mdtype_fname(self, data, compressed=False):
         (r_base, remote) = data.location
         local = self.cachedir + '/' + os.path.basename(remote)
 
         if compressed: # DB file, we need the uncompressed version
-            local = local.replace('.bz2', '')
+            local = misc.decompress(local, fn_only=True)
         return local
 
     def _groupCheckDataMDNewer(self):
@@ -1120,6 +1156,7 @@ class YumRepository(Repository, config.RepoConf):
         if repoXML.length != repomd.size:
             return False
 
+        done = False
         for checksum in repoXML.checksums:
             if checksum not in repomd.chksums:
                 continue
@@ -1127,11 +1164,11 @@ class YumRepository(Repository, config.RepoConf):
             if repoXML.checksums[checksum] != repomd.chksums[checksum]:
                 return False
 
-            #  If we don't trust the checksum, then don't generate it in
-            # repoMDObject().
-            return True
+            #  All checksums should be trusted, but if we have more than one
+            # then we might as well check them all ... paranoia is good.
+            done = True
 
-        return False
+        return done
 
     def _checkRepoMetalink(self, repoXML=None, metalink_data=None):
         """ Check the repomd.xml against the metalink data, if we have it. """
@@ -1246,7 +1283,7 @@ class YumRepository(Repository, config.RepoConf):
             compressed = False
             local = self._get_mdtype_fname(data, False)
             if not os.path.exists(local):
-                local = local.replace('.bz2', '')
+                local = misc.decompress(local, fn_only=True)
                 compressed = True
         #  If we can, make a copy of the system-wide-cache version of this file,
         # note that we often don't get here. So we also do this in
@@ -1315,6 +1352,16 @@ class YumRepository(Repository, config.RepoConf):
                     os.rename(local, local + '.old.tmp')
                     reverts.append(local)
 
+                    #  This is the super easy way. We just to see if a generated
+                    # file is there for all files, but it should always work.
+                    #  And anyone who is giving us MD with blah and blah.sqlite
+                    # which are different types, can play a game I like to call
+                    # "come here, ouch".
+                    gen_local = local + '.sqlite'
+                    if os.path.exists(gen_local):
+                        os.rename(gen_local, gen_local + '.old.tmp')
+                        reverts.append(gen_local)
+
             if ndata is None: # Doesn't exist in this repo
                 continue
 
@@ -1353,10 +1400,9 @@ class YumRepository(Repository, config.RepoConf):
 
         for (ndata, nmdtype) in downloading_with_size + downloading_no_size:
             local = self._get_mdtype_fname(ndata, False)
-            if nmdtype.endswith("_db"): # Uncompress any .sqlite.bz2 files
+            if nmdtype.endswith("_db"): # Uncompress any compressed files
                 dl_local = local
-                local = local.replace('.bz2', '')
-                misc.bunzipFile(dl_local, local)
+                local = misc.decompress(dl_local)
                 misc.unlink_f(dl_local)
             self._oldRepoMDData['new_MD_files'].append(local)
 
@@ -1424,7 +1470,7 @@ class YumRepository(Repository, config.RepoConf):
         else:
             filepath = fo
 
-        if self.repo_gpgcheck:
+        if self.repo_gpgcheck and not self._override_sigchecks:
 
             if misc.gpgme is None:
                 raise URLGrabError(-1, 'pygpgme is not working so repomd.xml can not be verified for %s' % (self))
@@ -1441,7 +1487,6 @@ class YumRepository(Repository, config.RepoConf):
                                        size=102400)
             except URLGrabError, e:
                 raise URLGrabError(-1, 'Error finding signature for repomd.xml for %s: %s' % (self, e))
-
             valid = misc.valid_detached_sig(result, filepath, self.gpgdir)
             if not valid and self.gpg_import_func:
                 try:
@@ -1518,15 +1563,17 @@ class YumRepository(Repository, config.RepoConf):
         """ Internal function, use .retrieveMD() from outside yum. """
         #  Note that this can raise Errors.RepoMDError if mdtype doesn't exist
         # for this repo.
+        # FIXME - maybe retrieveMD should call decompress() after we've checked
+        # the checksum by default? since we're never acting on compressed MD
         thisdata = self.repoXML.getData(mdtype)
 
         (r_base, remote) = thisdata.location
         fname = os.path.basename(remote)
         local = self.cachedir + '/' + fname
 
-        if self.retrieved.has_key(mdtype):
-            if self.retrieved[mdtype]: # got it, move along
-                return local
+        if self.retrieved.get(mdtype):
+            # got it, move along
+            return local
 
         if self.cache == 1:
             if os.path.exists(local):
@@ -1552,9 +1599,17 @@ class YumRepository(Repository, config.RepoConf):
         try:
             checkfunc = (self.checkMD, (mdtype,), {})
             text = "%s/%s" % (self.id, mdtype)
+            if thisdata.size is None:
+                reget = None
+            else:
+                reget = 'simple'
+                if os.path.exists(local):
+                    if os.stat(local).st_size >= int(thisdata.size):
+                        misc.unlink_f(local)
             local = self._getFile(relative=remote,
                                   local=local, 
                                   copy_local=1,
+                                  reget=reget,
                                   checkfunc=checkfunc, 
                                   text=text,
                                   cache=self.http_caching == 'all',
@@ -1762,9 +1817,9 @@ class YumRepository(Repository, config.RepoConf):
 
         grpfile = self.getGroups()
 
-        # open it up as a file object so iterparse can cope with our gz file
-        if grpfile is not None and grpfile.endswith('.gz'):
-            grpfile = gzip.open(grpfile)
+        # open it up as a file object so iterparse can cope with our compressed file
+        if grpfile is not None:
+            grpfile = misc.decompress(grpfile)
         try:
             c = comps.Comps()
             c.add(grpfile)

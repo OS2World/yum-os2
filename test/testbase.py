@@ -17,6 +17,9 @@ from cli import YumBaseCli
 from yum.rpmsack import RPMDBPackageSack as _rpmdbsack
 import inspect
 from rpmUtils import arch
+from rpmUtils.transaction import initReadOnlyTransaction
+import rpmUtils.miscutils
+
 
 #############################################################
 ### Helper classes ##########################################
@@ -25,6 +28,10 @@ from rpmUtils import arch
 # Dummy translation wrapper
 def _(msg):
     return msg
+
+# dummy save_ts to avoid lots of errors
+def save_ts(*args, **kwargs):
+    pass
 
 class FakeConf(object):
 
@@ -44,11 +51,26 @@ class FakeConf(object):
         self.persistdir = '/should-not-exist-bad-test!'
         self.showdupesfromrepos = False
         self.uid = 0
+        self.groupremove_leaf_only = False
+        self.protected_packages = []
+        self.protected_multilib = False
+        self.clean_requirements_on_remove = True
+
+class FakeSack:
+    """ Fake PackageSack to use with FakeRepository"""
+    def __init__(self):
+        pass # This is fake, so do nothing
+    
+    def have_fastReturnFileEntries(self):
+        return True
 
 class FakeRepo(object):
 
+    __fake_sack = FakeSack()
     def __init__(self, id=None,sack=None):
         self.id = id
+        if sack is None:
+            sack = self.__fake_sack
         self.sack = sack
         self.cost = 1000
 
@@ -62,6 +84,39 @@ class FakeRepo(object):
         else:
             return 0
 
+class FakeYumDBInfo(object):
+    """Simulate some functionality of RPMAdditionalDataPackage"""
+    _auto_hardlink_attrs = set(['checksum_type', 'reason',
+                                'installed_by', 'changed_by',
+                                'from_repo', 'from_repo_revision',
+                                'from_repo_timestamp', 'releasever',
+                                'command_line'])
+     
+    def __init__(self, conf=None, pkgdir=None, yumdb_cache=None):
+        self.db = {}
+        for attr in self._auto_hardlink_attrs:
+            self.db[attr] = ''
+            
+    def __getattr__(self, attr):
+        return self.db[attr]
+
+    def __setattr__(self, attr, value):
+        if not attr.startswith("db"):
+            self.db[attr] = value
+        else:
+            object.__setattr__(self, attr, value)
+            
+    def __iter__(self, show_hidden=False):
+        for item in self.db:
+            yield item
+
+    def get(self, attr, default=None):
+        try:
+            res = self.db[attr]
+        except AttributeError:
+            return default
+        return res
+        
 class FakePackage(packages.YumAvailablePackage):
 
     def __init__(self, name, version='1.0', release='1', epoch='0', arch='noarch', repo=None):
@@ -80,24 +135,34 @@ class FakePackage(packages.YumAvailablePackage):
         self.epoch = epoch
         self.arch = arch
         self.pkgtup = (self.name, self.arch, self.epoch, self.version, self.release)
-        self.yumdb_info = {}
+        self.yumdb_info = FakeYumDBInfo()
 
         self.prco['provides'].append((name, 'EQ', (epoch, version, release)))
 
         # Just a unique integer
         self.id = self.__hash__()
         self.pkgKey = self.__hash__()
-
+        
+        self.required_pkgs = []
+        self.requiring_pkgs = []
     def addProvides(self, name, flag=None, evr=(None, None, None)):
         self.prco['provides'].append((name, flag, evr))
     def addRequires(self, name, flag=None, evr=(None, None, None)):
         self.prco['requires'].append((name, flag, evr))
+    def addRequiresPkg(self, pkg):
+        self.required_pkgs.append(pkg)
+    def addRequiringPkg(self, pkg):
+        self.requiring_pkgs.append(pkg)   
     def addConflicts(self, name, flag=None, evr=(None, None, None)):
         self.prco['conflicts'].append((name, flag, evr))
     def addObsoletes(self, name, flag=None, evr=(None, None, None)):
         self.prco['obsoletes'].append((name, flag, evr))
     def addFile(self, name, ftype='file'):
         self.files[ftype].append(name)
+    def required_packages(self):
+        return self.required_pkgs
+    def requiring_packages(self):
+        return self.requiring_pkgs
 
 class _Container(object):
     pass
@@ -113,13 +178,17 @@ class DepSolveProgressCallBack:
     
     def pkgAdded(self, pkgtup, mode):
         modedict = { 'i': _('installed'),
-                     'u': _('updated'),
-                     'o': _('obsoleted'),
-                     'e': _('erased')}
+                     'u': _('an update'),
+                     'e': _('erased'),
+                     'r': _('reinstalled'),
+                     'd': _('a downgrade'),
+                     'o': _('obsoleting'),
+                     'ud': _('updated'),
+                     'od': _('obsoleted'),}
         (n, a, e, v, r) = pkgtup
         modeterm = modedict[mode]
         self.verbose_logger.log(logginglevels.INFO_2,
-            _('---> Package %s.%s %s:%s-%s set to be %s'), n, a, e, v, r,
+            _('---> Package %s.%s %s:%s-%s will be %s'), n, a, e, v, r,
             modeterm)
         
     def start(self):
@@ -280,6 +349,11 @@ class FakeRpmDb(packageSack.PackageSack):
     def transactionReset(self):
         return
 
+    def readOnlyTS(self):
+        #  Should probably be able to "fake" this, so we can provide different
+        # get_running_kernel_pkgtup(). Bah.
+        return initReadOnlyTransaction("/")
+
     def getProvides(self, name, flags=None, version=(None, None, None)):
         """return dict { packages -> list of matching provides }"""
         self._checkIndexes(failure='build')
@@ -287,6 +361,8 @@ class FakeRpmDb(packageSack.PackageSack):
         # convert flags & version for unversioned reqirements
         if not version:
             version=(None, None, None)
+        if type(version) in (str, type(None), unicode):
+            version = rpmUtils.miscutils.stringToVersion(version)
         if flags == '0':
             flags=None
         for po in self.provides.get(name, []):
@@ -337,9 +413,9 @@ class DepsolveTests(_DepsolveTestsBase):
     def resetTsInfo(self):
         self.tsInfo = transactioninfo.TransactionData()
         
-
     def resolveCode(self):
         solver = YumBase()
+        solver.save_ts  = save_ts
         solver.conf = FakeConf()
         solver.arch.setup_arch('x86_64')
         solver.tsInfo = solver._tsInfo = self.tsInfo
@@ -380,7 +456,7 @@ class OperationsTests(_DepsolveTestsBase):
     """
 
     def runOperation(self, args, installed=[], available=[],
-                     confs={}):
+                     confs={}, multi_cmds=False):
         """Sets up and runs the depsolver. args[0] must be a valid yum command
         ("install", "update", ...). It might be followed by pkg names as on the
         yum command line. The pkg objects in installed are added to self.rpmdb and
@@ -388,6 +464,7 @@ class OperationsTests(_DepsolveTestsBase):
         requirements from.
         """
         depsolver = YumBaseCli()
+        depsolver.save_ts = save_ts
         depsolver.arch.setup_arch('x86_64')
         self.rpmdb = depsolver.rpmdb = FakeRpmDb()
         self.xsack = depsolver._pkgSack  = packageSack.PackageSack()
@@ -409,9 +486,18 @@ class OperationsTests(_DepsolveTestsBase):
             po.repoid = po.repo.id
             self.depsolver._pkgSack.addPackage(po)
 
-        self.depsolver.basecmd = args[0]
-        self.depsolver.extcmds = args[1:]
-        res, msg = self.depsolver.doCommands()
+        if not multi_cmds:
+            self.depsolver.basecmd = args[0]
+            self.depsolver.extcmds = args[1:]
+            res, msg = self.depsolver.doCommands()
+        else:
+            for nargs in args:
+                self.depsolver.basecmd = nargs[0]
+                self.depsolver.extcmds = nargs[1:]
+                res, msg = self.depsolver.doCommands()
+                if res != 2:
+                    return res, msg
+
         self.tsInfo = depsolver.tsInfo
         if res!=2:
             return res, msg

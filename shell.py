@@ -1,3 +1,4 @@
+#! /usr/bin/python -tt
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
@@ -50,6 +51,14 @@ class YumShell(cmd.Cmd):
         self.logger = logging.getLogger("yum.cli")
         self.verbose_logger = logging.getLogger("yum.verbose.cli")
 
+        # NOTE: This is shared with self.base ... so don't reassign.
+        self._shell_history_cmds = []
+
+    def _shell_history_add_cmds(self, cmds):
+        if not self.base.conf.history_record:
+            return
+
+        self._shell_history_cmds.append(cmds)
 
     def _shlex_split(self, input_string):
         """split the input using shlex rules, and error or exit accordingly"""
@@ -97,6 +106,8 @@ class YumShell(cmd.Cmd):
             self.base.cmdstring = self.base.cmdstring.replace('\n', '')
             self.base.cmds = self._shlex_split(self.base.cmdstring)
             self.base.plugins.run('args', args=self.base.cmds)
+
+            self._shell_history_add_cmds(self.base.cmds)
 
             try:
                 self.base.parseCommands()
@@ -266,6 +277,8 @@ class YumShell(cmd.Cmd):
             cmds.insert(0, 'repolist')
             self.base.cmds = cmds
 
+            self._shell_history_add_cmds(self.base.cmds)
+
             try:
                 self.base.parseCommands()
             except Errors.YumBaseError:
@@ -342,11 +355,13 @@ class YumShell(cmd.Cmd):
                 if e.errno == 32:
                     self.logger.critical('\n\nExiting on Broken Pipe')
             else:
-                if returnval not in [0,1]:
+                if returnval not in [0,1,-1]:
                     self.verbose_logger.info('Transaction encountered a serious error.')
                 else:
                     if returnval == 1:
                         self.verbose_logger.info('There were non-fatal errors in the transaction')
+                    elif returnval == -1:
+                        self.verbose_logger.info("Transaction didn't start")
                     self.verbose_logger.log(logginglevels.INFO_2,
                         'Finished Transaction')
                 self.base.closeRpmDB()

@@ -5,36 +5,35 @@
 '''A.''' A yum faq.
 ----
 
-===== Q. 2: Where do I find a repository to update my system which is running d
-istribution <XYZ>? =====
+===== Q. 2: Where do I find a repository to update my system which is running di
+stribution <XYZ>? =====
 
-'''A.''' We have no idea.  Your distribution should maintain their own list on
-this subject.  If they don't support yum but you want to use it anyway you are
-probably going to have to make your own repository.
+'''A.''' We have no idea.  Your distribution should maintain their own list on t
+his subject.  If they don't support yum but you want to use it anyway you are pr
+obably going to have to make your own repository.
 ----
 
 ===== Q. 3: How do I upgrade my machine from release X to release Y? =====
 
-'''A.''' We have little idea.  If you are using Fedora, check out [http://fedor
-aproject.org/wiki/YumUpgradeFaq this guide written by Fedora Developers and Con
-tributors].  If you are using something else, try looking at their docs or aski
-ng on their mailing lists.
+'''A.''' We have little idea.  If you are using Fedora, check out [http://fedora
+project.org/wiki/YumUpgradeFaq this guide written by Fedora Developers and Contr
+ibutors].  If you are using something else, try looking at their docs or asking
+on their mailing lists.
 
 ----
 
-===== Q. 4: How can I get yum to keep package "foo" at a certain version in a f
-ashion similar to pinning provided by apt? =====
+===== Q. 4: How can I get yum to keep package "foo" at a certain version in a fa
+shion similar to pinning provided by apt? =====
 
 '''A.''' There are several ways you can do this.
 
- * One is to exclude it from your updates list. See man yum.conf for more detai
-ls.
+ * One is to exclude it from your updates list. See man yum.conf for more detail
+s.
 
- * Another way to pin package "foo" to a certain version is to use the versionl
-ock plugin.
+ * Another way to pin package "foo" to a certain version is to use the versionlo
+ck plugin.
 
 If you are using the latest Fedora (12) then the plugin can be installed using:
-
 {{{
 yum install yum-plugin-versionlock
 }}}
@@ -72,8 +71,8 @@ that does not yet have the latest yum available you can use:
 {{{
 yum install yum-versionlock
 }}}
-This older version of the plug-in does not extend command line flags that you c
-an pass to yum and the lock list must be edited manually.
+This older version of the plug-in does not extend command line flags that you ca
+n pass to yum and the lock list must be edited manually.
 
 For a manual install the source can be obtained from the current git
 repository for yum which is
@@ -89,113 +88,113 @@ All files should be ''root.root'' with ''644'' permissions.
 ----
 
 ===== Q. 5: I get an "[Errno -1] Header is not complete." error from yum - what
- the heck is going on? =====
+the heck is going on? =====
 
-'''A.''' It's probably a proxy somewhere between you and the repository.  You m
-ay not think that a proxy is in the way even though it really is.
+'''A.''' It's probably a proxy somewhere between you and the repository.  You ma
+y not think that a proxy is in the way even though it really is.
 
 You can try doing a "trace" with this command:
 {{{
-echo -e "TRACE / HTTP/1.1\nHost:  yum-server.example.com\n\n"  | nc yum-server.
-example.com 80
+echo -e "TRACE / HTTP/1.1\nHost:  yum-server.example.com\n\n"  | nc yum-server.e
+xample.com 80
 }}}
-Which should give you some more information about the network between you and t
-he repository.  Also, be sure to replace yum-server.example.com with whatever y
-our yum repository server is.
+Which should give you some more information about the network between you and th
+e repository.  Also, be sure to replace yum-server.example.com with whatever you
+r yum repository server is.
 
-Another diagnosis step is to get the box off of that network (not always entire
-ly possible, but port forwarding, VPN, or dialup can simulate the experience) a
-nd see if you still have the problem.
+Another diagnosis step is to get the box off of that network (not always entirel
+y possible, but port forwarding, VPN, or dialup can simulate the experience) and
+ see if you still have the problem.
 
 The solutions to this problem are:
 
- 1. Get your proxy software/firmware updated so that it properly implements HTT
-P 1.1
+ 1. Get your proxy software/firmware updated so that it properly implements HTTP
+ 1.1
  2. Use an FTP repository, where byte ranges are more commonly supported by the
- proxy
+proxy
  3. Create a local mirror with rsync and then point your yum.conf to that local
- mirror
+mirror
  4. Don't use yum
 
 ----
 
-===== Q. 6: I'm upgrading and I get "Error: Missing Dependency:" messages like
-"Error: Missing Dependency: libgcj.so.5 is needed by package junit" and then yu
-m quits.  What should I do? =====
+===== Q. 6: I'm upgrading and I get "Error: Missing Dependency:" messages like "
+Error: Missing Dependency: libgcj.so.5 is needed by package junit" and then yum
+quits.  What should I do? =====
 
-'''A.''' yum is trying to tell you that some packages that are being replaced o
-r obsoleted are needed by an installed package, so yum can't do it's work.  To
-interpret the example, the installed junit package requires libgcj.so.5 and lib
-gcj.so.5 is being updated or obsoleted so junit would no longer work if yum upd
-ated the libgcj.so.5 package.
+'''A.''' yum is trying to tell you that some packages that are being replaced or
+ obsoleted are needed by an installed package, so yum can't do it's work.  To in
+terpret the example, the installed junit package requires libgcj.so.5 and libgcj
+.so.5 is being updated or obsoleted so junit would no longer work if yum updated
+ the libgcj.so.5 package.
 
-One relatively easy way to fix this is to remove whatever package "needs" the p
-ackages that are about to be upgraded/obsoleted and then reinstall that package
- after you have upgraded everything else.  In the example, remove junit, upgrad
-e, then reinstall junit.
+One relatively easy way to fix this is to remove whatever package "needs" the pa
+ckages that are about to be upgraded/obsoleted and then reinstall that package a
+fter you have upgraded everything else.  In the example, remove junit, upgrade,
+then reinstall junit.
 
-Another solution is to find a repository that provides an upgraded of the packa
-ge that "needs" the old packages and add it to your yum configuration.  Hopeful
-ly the new version of that package will have dependencies on the upgraded packa
-ge, in our case libgcj.so.5, and yum will take care of everything.
+Another solution is to find a repository that provides an upgraded of the packag
+e that "needs" the old packages and add it to your yum configuration.  Hopefully
+ the new version of that package will have dependencies on the upgraded package,
+ in our case libgcj.so.5, and yum will take care of everything.
 
-For more details, see [https://lists.dulug.duke.edu/pipermail/yum/2005-July/006
-994.html this post by Garrick Staples]
+For more details, see [http://lists.baseurl.org/pipermail/yum/2005-July/018079.h
+tml this post by Garrick Staples]
 
 ----
 
-===== Q. 7: I installed a new version of yum (or upgraded my whole system) and
-now when I run yum, I get an error saying "The yum libraries do not seem to be
-available on your system for this version of python" and "Please make sure the
-package you used to install yum was built for your install of python." What's w
-rong with the yum package I've got, or my Python installation, and how do I fix
- it? =====
+===== Q. 7: I installed a new version of yum (or upgraded my whole system) and n
+ow when I run yum, I get an error saying "The yum libraries do not seem to be av
+ailable on your system for this version of python" and "Please make sure the pac
+kage you used to install yum was built for your install of python." What's wrong
+ with the yum package I've got, or my Python installation, and how do I fix it?
+=====
 
 '''A.'''
 
-In pre-2.3.? yum  This error message is often misleading. To see the real error
-, run `python` from the command line, and type `import yum`. The problem probab
-ly isn't with your version of python at all, but with a missing libxml2-python,
- python-sqlite, or python-elementtree package.
+In pre-2.3.? yum  This error message is often misleading. To see the real error,
+ run `python` from the command line, and type `import yum`. The problem probably
+ isn't with your version of python at all, but with a missing libxml2-python, py
+thon-sqlite, or python-elementtree package.
 
-Yum 2.4.x provides a different error with the module import errors, so this wil
-l become less confusing.
+Yum 2.4.x provides a different error with the module import errors, so this will
+ become less confusing.
 
-It also includes a directive to send the error to the mailing list.  Really, yo
-u should figure out what rpm provides the module that was missing and try to in
-stall that.
+It also includes a directive to send the error to the mailing list.  Really, you
+ should figure out what rpm provides the module that was missing and try to inst
+all that.
 
-If you are getting a message that yum itself is the missing module then you pro
-bably installed it incorreclty (or installed the source rpm using make/make ins
-tall).  If possible, find a prebuilt rpm that will work for your system like on
-e from Fedora or CentOS.  Or, you can download the srpm and do a
+If you are getting a message that yum itself is the missing module then you prob
+ably installed it incorreclty (or installed the source rpm using make/make insta
+ll).  If possible, find a prebuilt rpm that will work for your system like one f
+rom Fedora or CentOS.  Or, you can download the srpm and do a
 
 rpmbuild --rebuild yum*.src.rpm
 
 ----
 
-===== Q. 8: Yum is very nice at updating my kernel, but I use the (nvidia | ope
-nafs | other module) and yum doesn't seem to handle it well.  Could you fix yum
- to handle this for me? =====
+===== Q. 8: Yum is very nice at updating my kernel, but I use the (nvidia | open
+afs | other module) and yum doesn't seem to handle it well.  Could you fix yum t
+o handle this for me? =====
 
-'''A.''' This is a known and non-trivial problem, but people are talking and wo
-rking on it.  Please read ideas on [https://lists.dulug.duke.edu/pipermail/yum-
-devel/2005-June/thread.html#1232 this plugin] and messages from [http://www.goo
-gle.com/search?q=yum+kernel+module+site:lists.dulug.duke.edu&num=20&hl=en&lr=&s
-tart=20&sa=N the Google search of the yum archives] to get more details.
+'''A.''' This is a known and non-trivial problem, but people are talking and wor
+king on it.  Please read ideas on [http://lists.baseurl.org/pipermail/yum-devel/
+2005-June/thread.html#1232 this plugin] and messages from [http://www.google.com
+/search?q=yum+kernel+module+site:lists.baseurl.org&num=20&hl=en&lr=&start=20&sa=
+N the Google search of the yum archives] to get more details.
 
 ----
 
 
 ===== Q. 9: How does yum handle updates/installs on x86_64 machines? =====
 
-'''A.''' There are times when it is beneficial to have both 32 and 64 bit versi
-ons of a package installed on a machine such as when another package only has a
- 32bit version and needs to access 32bit libraries of something that you would
-normally only install the 64bit package.  So, if you do "yum install foo" then
-you will get both foo.i386.rpm and foo.x86_64.rpm installed on your system.  Th
-is is the desired behavior in most cases even if it takes up more disk space.
-If you do a "yum install foo.x86_64" then you will only get the x86_64 package.
+'''A.''' There are times when it is beneficial to have both 32 and 64 bit versio
+ns of a package installed on a machine such as when another package only has a 3
+2bit version and needs to access 32bit libraries of something that you would nor
+mally only install the 64bit package.  So, if you do "yum install foo" then you
+will get both foo.i386.rpm and foo.x86_64.rpm installed on your system.  This is
+ the desired behavior in most cases even if it takes up more disk space.  If you
+ do a "yum install foo.x86_64" then you will only get the x86_64 package.
 
 ----
 
@@ -203,23 +202,23 @@ If you do a "yum install foo.x86_64" then you will only get the x86_64 package.
 
 ===== Q. 10: How can I search the mailing list archives? =====
 
-'''A.''' One easy way is to use the google site: keyword pointed at the server
-for the mailing list [http://www.google.com/search?num=20&hl=en&lr=&q=your_sear
-ch_term+site%3Alists.dulug.duke.edu&btnG=Search thusly.]  Of course, you should
- replace "your_search_term" in that example to your search term.
+'''A.''' One easy way is to use the google site: keyword pointed at the server f
+or the mailing list [http://www.google.com/search?num=20&hl=en&lr=&q=your_search
+_term+site%3Alists.baseurl.org&btnG=Search thusly.]  Of course, you should repla
+ce "your_search_term" in that example to your search term.
 
 ----
 
 ===== Q. 11: How can I create a yum repository? =====
 
-'''A.''' First, are you sure you want to create a repository and not just mirro
-r an existing one?  If all you want is a mirrored local copy of someone else's
-repository, just make sure that your rsync script (or whatever mirroring proces
-s you are using) includes the repodata directory from the mirror's source.
+'''A.''' First, are you sure you want to create a repository and not just mirror
+ an existing one?  If all you want is a mirrored local copy of someone else's re
+pository, just make sure that your rsync script (or whatever mirroring process y
+ou are using) includes the repodata directory from the mirror's source.
 
-If you really want to make your own yum repository, the command depends on the
-version of yum that you are going to use with this repository, but the method i
-s basically the same.
+If you really want to make your own yum repository, the command depends on the v
+ersion of yum that you are going to use with this repository, but the method is
+basically the same.
 
 for 2.0.X or earlier:[[BR]]
 yum-arch /path/to/where/you/want/the/repo/made
@@ -227,13 +226,9 @@ yum-arch /path/to/where/you/want/the/repo/made
 for 2.2.x or later:[[BR]]
 createrepo /path/to/where/you/want/the/repo/made
 
-You may also be served by reading [http://linux.duke.edu/projects/metadata/] an
-d even searching the yum list archives [http://wiki.linux.duke.edu/YumFaq#Q10 a
-s described in question 10].
+You may also be served by reading [http://createrepo.baseurl.org/] and even sear
+ching the yum list archives as described in question 10
 
-Note that you do not need yum to create a repo for 2.2.x or later.  You can use
- the createrepo package available from a variety of places including the Duke M
-etadata link given above or available from places like Dag's repository.
 
 ----
 
@@ -241,58 +236,68 @@ etadata link given above or available from places like Dag's repository.
 
 ===== Q. 12: How can I get help? =====
 
-'''A.''' Well, you're on this page so that's a start.  And you've already passe
-d most of the technical faqs and the advice on [http://wiki.linux.duke.edu/YumF
-aq#Q10 using Google to search the mailing list]. If you've made it this far and
- haven't solved your problem you should know about the [http://linux.duke.edu/p
-rojects/yum/support.ptml support options.]  Basically, ask questions on the [ht
-tps://lists.dulug.duke.edu/mailman/listinfo/yum mailing list] and file bugs in
-[https://devel.linux.duke.edu/bugzilla the bugzilla].
+'''A.''' Well, you're on this page so that's a start.  And you've already passed
+ most of the technical faqs and the advice on using Google to search the mailing
+ list. If you've made it this far and haven't solved your problem you should kno
+w about the [http://yum.baseurl.org/#GetHelp support options.]  Basically, ask q
+uestions on the [http://lists.baseurl.org/mailman/listinfo/yum mailing list] and
+ file bugs in [http://yum.baseurl.org/report trac]
 
 ----
 
-===== Q. 13: If the most recent version of a package is available in multiple r
-epositories, how can I instruct yum to consistently pull it from a specific rep
-ository?  Stated differently, how can I give priority to a certain mirror or my
- local repositories? =====
+===== Q. 13: If the most recent version of a package is available in multiple re
+positories, how can I instruct yum to consistently pull it from a specific repos
+itory?  Stated differently, how can I give priority to a certain mirror or my lo
+cal repositories? =====
 
-'''A.''' yum will get the package from the repository listed first in the yum.c
-onf file.  You can read more in [https://lists.dulug.duke.edu/pipermail/yum/200
-5-May/006564.html this explanation.]
+'''A.''' yum will get the package from the repository listed first in the yum.co
+nf file.  You can read more in [http://lists.baseurl.org/pipermail/yum/2005-May/
+017649.html this explanation.]
 
 ----
 
-===== Q. 14: How can I tell yum to download a source package (i.e., a .src.rpm
-file)? =====
+===== Q. 14: How can I tell yum to download a source package (i.e., a .src.rpm f
+ile)? =====
 
-'''A.''' The main yum program doesn't do this -- it's not within the scope of t
-he program's design goals. But, since it's a very useful function, the {{{yumdo
-wnloader}}} program from the {{{yum-utils}}} package is available for doing thi
-s very thing. Simply run something like: {{{
+'''A.''' The main yum program doesn't do this -- it's not within the scope of th
+e program's design goals. But, since it's a very useful function, the {{{yumdown
+loader}}} program from the {{{yum-utils}}} package is available for doing this v
+ery thing. Simply run something like: {{{
   yumdownloader --source yum
 }}}
 and you'll get the yum src.rpm in your current directory.
 
 In order to keep yum's interface (and internal code) clean and straightforward,
- this will not be added to yum proper. And yumdownloader works well.
+this will not be added to yum proper. And yumdownloader works well.
 ----
 
 
-===== Q. 15: I'm behind a Microsoft proxy using NTLM authentication.  What can
-I do? =====
-'''A.''' Some people have had luck using [http://ntlmaps.sourceforge.net/ the N
-TLM APS project].
+===== Q. 15: I'm behind a Microsoft proxy using NTLM authentication.  What can I
+ do? =====
+'''A.''' Some people have had luck using [http://ntlmaps.sourceforge.net/ the NT
+LM APS project].
 ----
 
 ===== Q. 16: Can yum downgrade packages? =====
-'''A.''' Not really. Look at DownGradeProblems for more details on why downgrad
-es are tricky.
+'''A.''' Downgrades are tricky but in yum versions 3.2.27 and above it can do _s
+ome_ downgrades. They are not perfect and should be
+         used with care.
 ----
 
 ==== Q. 17: Why does yum always seem to update the metadata on EVERY run? ====
-'''A.''' It doesn't. It updates to check the metadata any time the cache timeou
-t has been hit. The default can be set in your /etc/yum.conf
-file and per repository config. see the yum man page and look for the metadata_
-expire value for how to set it to a different value.
+'''A.''' It doesn't. It updates to check the metadata any time the cache timeout
+ has been hit. The default can be set in your /etc/yum.conf
+file and per repository config. see the yum man page and look for the metadata_e
+xpire value for how to set it to a different value.
 ----
+
+==== Q. 18: How does yum determine which pkg to install for a dependency if more
+ than one pkg provides a dependency? ====
+'''A.''' See the CompareProviders wiki page for more detailed information.
+----
+
+=== Q. 19: What's the yum equivalent for rpm --nodeps --force? ===
+'''A.''' See the NoDeps wiki page for more detailed information.
+----
+
 

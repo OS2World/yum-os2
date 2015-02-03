@@ -46,9 +46,26 @@ class YumTestTransactionError(YumBaseError):
 class YumRPMCheckError(YumBaseError):
     pass
         
+class YumRPMTransError(YumBaseError):
+    """ This class means rpm's .ts.run() returned known errors. We are compat.
+        with YumBaseError in that we print nicely, and compat. with traditional
+        usage of this error from runTransaction(). """
+    def __init__(self, msg, errors):
+        self.msg    = msg
+        self.errors = errors
+        # old YumBaseError raises from runTransaction used to raise just this
+        self.value  = self.errors
+
+    def __str__(self):
+        return "%s" %(self.msg,)
+
+    def __unicode__(self):
+        return '%s' % to_unicode(self.msg)
+
+
 class LockError(YumBaseError):
     def __init__(self, errno, msg, pid=0):
-        YumBaseError.__init__(self)
+        YumBaseError.__init__(self, msg)
         self.errno = errno
         self.msg = msg
         self.pid = pid
@@ -90,7 +107,9 @@ class ReinstallRemoveError(ReinstallError):
     pass
 
 class ReinstallInstallError(ReinstallError):
-    pass
+    def __init__(self, value=None, failed_pkgs=[]):
+        ReinstallError.__init__(self, value)
+        self.failed_pkgs = failed_pkgs
 
 class DowngradeError(YumBaseError):
     pass
