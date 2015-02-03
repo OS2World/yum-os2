@@ -5,8 +5,8 @@ import os
 
 # dict mapping arch -> ( multicompat, best personality, biarch personality )
 multilibArches = { "x86_64":  ( "athlon", "x86_64", "athlon" ),
-                   "sparc64v": ( "sparc", "sparcv9v", "sparc64v" ),
-                   "sparc64": ( "sparc", "sparcv9", "sparc64" ),
+                   "sparc64v": ( "sparcv9v", "sparcv9v", "sparc64v" ),
+                   "sparc64": ( "sparcv9", "sparcv9", "sparc64" ),
                    "ppc64":   ( "ppc", "ppc", "ppc64" ),
                    "s390x":   ( "s390", "s390x", "s390" ),
                    }
@@ -37,7 +37,6 @@ arches = {
     "s390": "noarch",
     
     # sparc
-    "sparc64v": "sparc64",
     "sparc64v": "sparcv9v",
     "sparc64": "sparcv9",
     "sparcv9v": "sparcv9",
@@ -203,15 +202,19 @@ def getArchList(thisarch=None):
         archlist.append('noarch')
     return archlist
     
-        
+def _try_read_cpuinfo():
+    """ Try to read /proc/cpuinfo ... if we can't ignore errors (ie. proc not
+        mounted). """
+    try:
+        lines = open("/proc/cpuinfo", "r").readlines()
+        return lines
+    except:
+        return []
 
 def getCanonX86Arch(arch):
     # 
     if arch == "i586":
-        f = open("/proc/cpuinfo", "r")
-        lines = f.readlines()
-        f.close()
-        for line in lines:
+        for line in _try_read_cpuinfo():
             if line.startswith("model name") and line.find("Geode(TM)") != -1:
                 return "geode"
         return arch
@@ -220,10 +223,7 @@ def getCanonX86Arch(arch):
         return arch
 
     # if we're i686 and AuthenticAMD, then we should be an athlon
-    f = open("/proc/cpuinfo", "r")
-    lines = f.readlines()
-    f.close()
-    for line in lines:
+    for line in _try_read_cpuinfo():
         if line.startswith("vendor") and line.find("AuthenticAMD") != -1:
             return "athlon"
         # i686 doesn't guarantee cmov, but we depend on it
@@ -238,10 +238,7 @@ def getCanonPPCArch(arch):
         return arch
 
     machine = None
-    f = open("/proc/cpuinfo", "r")
-    lines = f.readlines()
-    f.close()
-    for line in lines:
+    for line in _try_read_cpuinfo():
         if line.find("machine") != -1:
             machine = line.split(':')[1]
             break
@@ -257,10 +254,7 @@ def getCanonPPCArch(arch):
 def getCanonSPARCArch(arch):
     # Deal with sun4v, sun4u, sun4m cases
     SPARCtype = None
-    f = open("/proc/cpuinfo", "r")
-    lines = f.readlines()
-    f.close()
-    for line in lines:
+    for line in _try_read_cpuinfo():
         if line.startswith("type"):
             SPARCtype = line.split(':')[1]
             break
@@ -286,10 +280,7 @@ def getCanonX86_64Arch(arch):
         return arch
 
     vendor = None
-    f = open("/proc/cpuinfo", "r")
-    lines = f.readlines()
-    f.close()
-    for line in lines:
+    for line in _try_read_cpuinfo():
         if line.startswith("vendor_id"):
             vendor = line.split(':')[1]
             break
@@ -369,6 +360,8 @@ def getBaseArch(myarch=None):
         return "sparc"
     elif myarch.startswith("ppc64"):
         return "ppc"
+    elif myarch.startswith("arm"):
+        return "arm"
         
     if isMultiLibArch(arch=myarch):
         if myarch in multilibArches:
@@ -398,7 +391,7 @@ class ArchStorage(object):
         self.multilib = False
         self.setup_arch()
 
-    def setup_arch(self, arch=None):
+    def setup_arch(self, arch=None, archlist_includes_compat_arch=True):
         if arch:
             self.canonarch = arch
         else:
@@ -406,6 +399,14 @@ class ArchStorage(object):
         
         self.basearch = getBaseArch(myarch=self.canonarch)
         self.archlist = getArchList(thisarch=self.canonarch)
+        
+        if not archlist_includes_compat_arch: # - do we bother including i686 and below on x86_64
+            limit_archlist = []
+            for a in self.archlist:
+                if isMultiLibArch(a) or a == 'noarch':
+                    limit_archlist.append(a)
+            self.archlist = limit_archlist
+            
         self.bestarch = getBestArch(myarch=self.canonarch)
         self.compatarches = getMultiArchInfo(arch=self.canonarch)
         self.multilib = isMultiLibArch(arch=self.canonarch)

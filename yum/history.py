@@ -22,13 +22,14 @@ import os, os.path
 import glob
 from weakref import proxy as weakref
 
-from sqlutils import sqlite, executeSQL, sql_esc, sql_esc_glob
+from sqlutils import sqlite, executeSQL, sql_esc_glob
 import yum.misc as misc
 import yum.constants
 from yum.constants import *
 from yum.packages import YumInstalledPackage, YumAvailablePackage, PackageObject
-from yum.i18n import to_unicode
+from yum.i18n import to_unicode, to_utf8
 
+from rpmUtils.arch import getBaseArch
 
 _history_dir = '/var/lib/yum/history'
 
@@ -98,7 +99,7 @@ def _setupHistorySearchSQL(patterns=None, ignore_case=False):
 
 class YumHistoryPackage(PackageObject):
 
-    def __init__(self, name, arch, epoch, version, release, checksum):
+    def __init__(self, name, arch, epoch, version, release, checksum=None):
         self.name    = name
         self.version = version
         self.release = release
@@ -111,6 +112,47 @@ class YumHistoryPackage(PackageObject):
         else:
             chk = checksum.split(':')
             self._checksums = [(chk[0], chk[1], 0)] # (type, checksum, id(0,1))
+        # Needed for equality comparisons in PackageObject
+        self.repoid = "<history>"
+
+class YumHistoryPackageState(YumHistoryPackage):
+    def __init__(self, name,arch, epoch,version,release, state, checksum=None):
+        YumHistoryPackage.__init__(self, name,arch, epoch,version,release,
+                                   checksum)
+        self.done  = None
+        self.state = state
+
+        self.repoid = '<history>'
+
+
+class YumHistoryRpmdbProblem(PackageObject):
+    """ Class representing an rpmdb problem that existed at the time of the
+        transaction. """
+
+    def __init__(self, history, rpid, problem, text):
+        self._history = weakref(history)
+
+        self.rpid = rpid
+        self.problem = problem
+        self.text = text
+
+        self._loaded_P = None
+
+    def __cmp__(self, other):
+        if other is None:
+            return 1
+        ret = cmp(self.problem, other.problem)
+        if ret: return -ret
+        ret = cmp(self.rpid, other.rpid)
+        return ret
+
+    def _getProbPkgs(self):
+        if self._loaded_P is None:
+            self._loaded_P = sorted(self._history._old_prob_pkgs(self.rpid))
+        return self._loaded_P
+
+    packages = property(fget=lambda self: self._getProbPkgs())
+
 
 class YumHistoryTransaction:
     """ Holder for a history transaction. """
@@ -128,6 +170,12 @@ class YumHistoryTransaction:
 
         self._loaded_TW = None
         self._loaded_TD = None
+        self._loaded_TS = None
+
+        self._loaded_PROB = None
+
+        self._have_loaded_CMD = False # cmdline can validly be None
+        self._loaded_CMD = None
 
         self._loaded_ER = None
         self._loaded_OT = None
@@ -153,9 +201,29 @@ class YumHistoryTransaction:
         if self._loaded_TD is None:
             self._loaded_TD = sorted(self._history._old_data_pkgs(self.tid))
         return self._loaded_TD
+    def _getTransSkip(self):
+        if self._loaded_TS is None:
+            self._loaded_TS = sorted(self._history._old_skip_pkgs(self.tid))
+        return self._loaded_TS
 
     trans_with = property(fget=lambda self: self._getTransWith())
     trans_data = property(fget=lambda self: self._getTransData())
+    trans_skip = property(fget=lambda self: self._getTransSkip())
+
+    def _getProblems(self):
+        if self._loaded_PROB is None:
+            self._loaded_PROB = sorted(self._history._old_problems(self.tid))
+        return self._loaded_PROB
+
+    rpmdb_problems = property(fget=lambda self: self._getProblems())
+
+    def _getCmdline(self):
+        if not self._have_loaded_CMD:
+            self._have_loaded_CMD = True
+            self._loaded_CMD = self._history._old_cmdline(self.tid)
+        return self._loaded_CMD
+
+    cmdline = property(fget=lambda self: self._getCmdline())
 
     def _getErrors(self):
         if self._loaded_ER is None:
@@ -169,6 +237,323 @@ class YumHistoryTransaction:
     errors     = property(fget=lambda self: self._getErrors())
     output     = property(fget=lambda self: self._getOutput())
 
+class YumMergedHistoryTransaction(YumHistoryTransaction):
+    def __init__(self, obj):
+        self._merged_tids = set([obj.tid])
+        self._merged_objs = [obj]
+
+        self.beg_timestamp    = obj.beg_timestamp
+        self.beg_rpmdbversion = obj.beg_rpmdbversion
+        self.end_timestamp    = obj.end_timestamp
+        self.end_rpmdbversion = obj.end_rpmdbversion
+
+        self._loaded_TW = None
+        self._loaded_TD = None
+        #  Hack, this is difficult ... not sure if we want to list everything
+        # that was skipped. Just those things which were skipped and then not
+        # updated later ... or nothing. Nothing is much easier.
+        self._loaded_TS = []
+
+        self._loaded_PROB = None
+
+        self._have_loaded_CMD = False # cmdline can validly be None
+        self._loaded_CMD = None
+
+        self._loaded_ER = None
+        self._loaded_OT = None
+
+        self.altered_lt_rpmdb = None
+        self.altered_gt_rpmdb = None
+
+    def _getAllTids(self):
+        return sorted(self._merged_tids)
+    tid         = property(fget=lambda self: self._getAllTids())
+
+    def _getLoginUIDs(self):
+        ret = set((tid.loginuid for tid in self._merged_objs))
+        if len(ret) == 1:
+            return list(ret)[0]
+        return sorted(ret)
+    loginuid    = property(fget=lambda self: self._getLoginUIDs())
+
+    def _getReturnCodes(self):
+        ret_codes = set((tid.return_code for tid in self._merged_objs))
+        if len(ret_codes) == 1 and 0 in ret_codes:
+            return 0
+        if 0 in ret_codes:
+            ret_codes.remove(0)
+        return sorted(ret_codes)
+    return_code = property(fget=lambda self: self._getReturnCodes())
+
+    def _getTransWith(self):
+        ret = []
+        filt = set()
+        for obj in self._merged_objs:
+            for pkg in obj.trans_with:
+                if pkg.pkgtup in filt:
+                    continue
+                filt.add(pkg.pkgtup)
+                ret.append(pkg)
+        return sorted(ret)
+
+    # This is the real tricky bit, we want to "merge" so that:
+    #     pkgA-1 => pkgA-2
+    #     pkgA-2 => pkgA-3
+    #     pkgB-1 => pkgB-2
+    #     pkgB-2 => pkgB-1
+    # ...becomes:
+    #     pkgA-1 => pkgA-3
+    #     pkgB-1 => pkgB-1 (reinstall)
+    # ...note that we just give up if "impossible" things happen, Eg.
+    #     pkgA-1 => pkgA-2
+    #     pkgA-4 => pkgA-5
+    @staticmethod
+    def _p2sk(pkg, state=None):
+        """ Take a pkg and return the key for it's state lookup. """
+        if state is None:
+            state = pkg.state
+        #  Arch is needed so multilib. works, dito. getBaseArch() -- (so .i586
+        # => .i686 moves are seen)
+        return (pkg.name, getBaseArch(pkg.arch), state)
+
+    @staticmethod
+    def _list2dict(pkgs):
+        pkgtup2pkg   = {}
+        pkgstate2pkg = {}
+        for pkg in pkgs:
+            key = YumMergedHistoryTransaction._p2sk(pkg)
+            pkgtup2pkg[pkg.pkgtup] = pkg
+            pkgstate2pkg[key]      = pkg
+        return pkgtup2pkg, pkgstate2pkg
+    @staticmethod
+    def _conv_pkg_state(pkg, state):
+        npkg = YumHistoryPackageState(pkg.name, pkg.arch,
+                                      pkg.epoch,pkg.version,pkg.release, state)
+        npkg._checksums = pkg._checksums
+        npkg.done = pkg.done
+        if _sttxt2stcode[npkg.state] in TS_INSTALL_STATES:
+            npkg.state_installed = True
+        if _sttxt2stcode[npkg.state] in TS_REMOVE_STATES:
+            npkg.state_installed = False
+        return npkg
+    @staticmethod
+    def _get_pkg(sk, pkgstate2pkg):
+        if type(sk) != type((0,1)):
+            sk = YumMergedHistoryTransaction._p2sk(sk)
+        if sk not in pkgstate2pkg:
+            return None
+        return pkgstate2pkg[sk]
+    def _move_pkg(self, sk, nstate, pkgtup2pkg, pkgstate2pkg):
+        xpkg = self._get_pkg(sk, pkgstate2pkg)
+        if xpkg is None:
+            return
+        del pkgstate2pkg[self._p2sk(xpkg)]
+        xpkg = self._conv_pkg_state(xpkg, nstate)
+        pkgtup2pkg[xpkg.pkgtup] = xpkg
+        pkgstate2pkg[self._p2sk(xpkg)] = xpkg
+
+    def _getTransData(self):
+        def _get_pkg_f(sk):
+            return self._get_pkg(sk, fpkgstate2pkg)
+        def _get_pkg_n(sk):
+            return self._get_pkg(sk, npkgstate2pkg)
+        def _move_pkg_f(sk, nstate):
+            self._move_pkg(sk, nstate, fpkgtup2pkg, fpkgstate2pkg)
+        def _move_pkg_n(sk, nstate):
+            self._move_pkg(sk, nstate, npkgtup2pkg, npkgstate2pkg)
+        def _del1_n(pkg):
+            del npkgtup2pkg[pkg.pkgtup]
+            key = self._p2sk(pkg)
+            if key in npkgstate2pkg: # For broken rpmdbv's and installonly
+                del npkgstate2pkg[key]
+        def _del1_f(pkg):
+            del fpkgtup2pkg[pkg.pkgtup]
+            key = self._p2sk(pkg)
+            if key in fpkgstate2pkg: # For broken rpmdbv's and installonly
+                del fpkgstate2pkg[key]
+        def _del2(fpkg, npkg):
+            assert fpkg.pkgtup == npkg.pkgtup
+            _del1_f(fpkg)
+            _del1_n(npkg)
+        fpkgtup2pkg   = {}
+        fpkgstate2pkg = {}
+        #  We need to go from oldest to newest here, so we can see what happened
+        # in the correct chronological order.
+        for obj in self._merged_objs:
+            npkgtup2pkg, npkgstate2pkg = self._list2dict(obj.trans_data)
+
+            # Handle Erase => Install, as update/reinstall/downgrade
+            for key in list(fpkgstate2pkg.keys()):
+                (name, arch, state) = key
+                if state not in  ('Obsoleted', 'Erase'):
+                    continue
+                fpkg = fpkgstate2pkg[key]
+                for xstate in ('Install', 'True-Install', 'Dep-Install',
+                               'Obsoleting'):
+                    npkg = _get_pkg_n(self._p2sk(fpkg, xstate))
+                    if npkg is not None:
+                        break
+                else:
+                    continue
+
+                if False: pass
+                elif fpkg > npkg:
+                    _move_pkg_f(fpkg, 'Downgraded')
+                    if xstate != 'Obsoleting':
+                        _move_pkg_n(npkg, 'Downgrade')
+                elif fpkg < npkg:
+                    _move_pkg_f(fpkg, 'Updated')
+                    if xstate != 'Obsoleting':
+                        _move_pkg_n(npkg, 'Update')
+                else:
+                    _del1_f(fpkg)
+                    if xstate != 'Obsoleting':
+                        _move_pkg_n(npkg, 'Reinstall')
+
+            sametups = set(npkgtup2pkg.keys()).intersection(fpkgtup2pkg.keys())
+            for pkgtup in sametups:
+                if pkgtup not in fpkgtup2pkg or pkgtup not in npkgtup2pkg:
+                    continue
+                fpkg = fpkgtup2pkg[pkgtup]
+                npkg = npkgtup2pkg[pkgtup]
+                if False: pass
+                elif fpkg.state == 'Reinstall':
+                    if npkg.state in ('Reinstall', 'Erase', 'Obsoleted',
+                                      'Downgraded', 'Updated'):
+                        _del1_f(fpkg)
+                elif fpkg.state in ('Obsoleted', 'Erase'):
+                    #  Should be covered by above loop which deals with
+                    # all goood state changes.
+                    good_states = ('Install', 'True-Install', 'Dep-Install',
+                                   'Obsoleting')
+                    assert npkg.state not in good_states
+
+                elif fpkg.state in ('Install', 'True-Install', 'Dep-Install'):
+                    if False: pass
+                    elif npkg.state in ('Erase', 'Obsoleted'):
+                        _del2(fpkg, npkg)
+                    elif npkg.state == 'Updated':
+                        _del2(fpkg, npkg)
+                        #  Move '*Install' state along to newer pkg. (not for
+                        # obsoletes).
+                        _move_pkg_n(self._p2sk(fpkg, 'Update'), fpkg.state)
+                    elif npkg.state == 'Downgraded':
+                        _del2(fpkg, npkg)
+                        #  Move '*Install' state along to newer pkg. (not for
+                        # obsoletes).
+                        _move_pkg_n(self._p2sk(fpkg, 'Downgrade'), fpkg.state)
+
+                elif fpkg.state in ('Downgrade', 'Update', 'Obsoleting'):
+                    if False: pass
+                    elif npkg.state == 'Reinstall':
+                        _del1_n(npkg)
+                    elif npkg.state in ('Erase', 'Obsoleted'):
+                        _del2(fpkg, npkg)
+
+                        # Move 'Erase'/'Obsoleted' state to orig. pkg.
+                        _move_pkg_f(self._p2sk(fpkg, 'Updated'),    npkg.state)
+                        _move_pkg_f(self._p2sk(fpkg, 'Downgraded'), npkg.state)
+
+                    elif npkg.state in ('Downgraded', 'Updated'):
+                        xfpkg = _get_pkg_f(self._p2sk(fpkg, 'Updated'))
+                        if xfpkg is None:
+                            xfpkg = _get_pkg_f(self._p2sk(fpkg, 'Downgraded'))
+                        if xfpkg is None:
+                            if fpkg.state != 'Obsoleting':
+                                continue
+                            # Was an Install*/Reinstall with Obsoletes
+                            xfpkg = fpkg
+                        xnpkg = _get_pkg_n(self._p2sk(npkg, 'Update'))
+                        if xnpkg is None:
+                            xnpkg = _get_pkg_n(self._p2sk(npkg, 'Downgrade'))
+                        if xnpkg is None:
+                            xnpkg = _get_pkg_n(self._p2sk(npkg, 'Obsoleting'))
+                        if xnpkg is None:
+                            continue
+
+                        #  Now we have 4 pkgs, f1, f2, n1, n2, and 3 pkgtups
+                        # f2.pkgtup == n1.pkgtup. So we need to find out if
+                        # f1 => n2 is an Update or a Downgrade.
+                        _del2(fpkg, npkg)
+                        if xfpkg == xnpkg:
+                            nfstate = 'Reinstall'
+                            if 'Obsoleting' in (fpkg.state, xnpkg.state):
+                                nfstate = 'Obsoleting'
+                            if xfpkg != fpkg:
+                                _move_pkg_f(xfpkg, nfstate)
+                            _del1_n(xnpkg)
+                        elif xfpkg < xnpkg:
+                            # Update...
+                            nfstate = 'Updated'
+                            nnstate = 'Update'
+                            if 'Obsoleting' in (fpkg.state, xnpkg.state):
+                                nnstate = 'Obsoleting'
+                            if xfpkg != fpkg:
+                                _move_pkg_f(xfpkg, nfstate)
+                            _move_pkg_n(xnpkg, nnstate)
+                        else:
+                            # Downgrade...
+                            nfstate = 'Downgraded'
+                            nnstate = 'Downgrade'
+                            if 'Obsoleting' in (fpkg.state, xnpkg.state):
+                                nnstate = 'Obsoleting'
+                            if xfpkg != fpkg:
+                                _move_pkg_f(xfpkg, nfstate)
+                            _move_pkg_n(xnpkg, nnstate)
+
+            for x in npkgtup2pkg:
+                fpkgtup2pkg[x] = npkgtup2pkg[x]
+            for x in npkgstate2pkg:
+                fpkgstate2pkg[x] = npkgstate2pkg[x]
+        return sorted(fpkgtup2pkg.values())
+
+    def _getProblems(self):
+        probs = set()
+        for tid in self._merged_objs:
+            for prob in tid.rpmdb_problems:
+                probs.add(prob)
+        return sorted(probs)
+
+    def _getCmdline(self):
+        cmdlines = []
+        for tid in self._merged_objs:
+            if not tid.cmdline:
+                continue
+            if cmdlines and cmdlines[-1] == tid.cmdline:
+                continue
+            cmdlines.append(tid.cmdline)
+        if not cmdlines:
+            return None
+        return cmdlines
+
+    def _getErrors(self):
+        ret = []
+        for obj in self._merged_objs:
+            ret.extend(obj.errors)
+        return ret
+    def _getOutput(self):
+        ret = []
+        for obj in self._merged_objs:
+            ret.extend(obj.output)
+        return ret
+
+    def merge(self, obj):
+        if obj.tid in self._merged_tids:
+            return # Already done, signal an error?
+
+        self._merged_tids.add(obj.tid)
+        self._merged_objs.append(obj)
+        # Oldest first...
+        self._merged_objs.sort(reverse=True)
+
+        if self.beg_timestamp > obj.beg_timestamp:
+            self.beg_timestamp    = obj.beg_timestamp
+            self.beg_rpmdbversion = obj.beg_rpmdbversion
+        if self.end_timestamp < obj.end_timestamp:
+            self.end_timestamp    = obj.end_timestamp
+            self.end_rpmdbversion = obj.end_rpmdbversion
+
+
 class YumHistory:
     """ API for accessing the history sqlite data. """
 
@@ -178,7 +563,13 @@ class YumHistory:
         self.conf = yum.misc.GenericHolder()
         # YD dbpath is already root based
         self.conf.db_path  = os.path.normpath(db_path)
+
+        #if not os.path.normpath(db_path).startswith(root):
+        #    self.conf.db_path  = os.path.normpath(root + '/' + db_path)
+        #else:
+        #    self.conf.db_path = os.path.normpath('/' + db_path)
         self.conf.writable = False
+        self.conf.readable = True
 
         if not os.path.exists(self.conf.db_path):
             try:
@@ -204,18 +595,49 @@ class YumHistory:
             except ValueError:
                 continue
 
+            self._db_date = '%s-%s-%s' % (pieces[0], pieces[1], pieces[2])
             self._db_file = d
             break
 
         if self._db_file is None:
             self._create_db_file()
+        
+        # make an addon path for where we're going to stick 
+        # random additional history info - probably from plugins and what-not
+        self.conf.addon_path = self.conf.db_path + '/' + self._db_date
+        if not os.path.exists(self.conf.addon_path):
+            try:
+                os.makedirs(self.conf.addon_path)
+            except (IOError, OSError), e:
+                # some sort of useful thing here? A warning?
+                return
+        else:
+            if os.access(self.conf.addon_path, os.W_OK):
+                self.conf.writable = True
+
 
     def __del__(self):
         self.close()
 
     def _get_cursor(self):
         if self._conn is None:
-            self._conn = sqlite.connect(self._db_file)
+            if not self.conf.readable:
+                return None
+
+            try:
+                self._conn = sqlite.connect(self._db_file)
+            except (sqlite.OperationalError, sqlite.DatabaseError):
+                self.conf.readable = False
+                return None
+
+            #  Note that this is required due to changing the history DB in the
+            # callback for removed txmbrs ... which happens inside the chroot,
+            # as against all our other access which is outside the chroot. So
+            # we need sqlite to not open the journal.
+            #  In theory this sucks, as history could be shared. In reality
+            # it's deep yum stuff and there should only be one yum.
+            executeSQL(self._conn.cursor(), "PRAGMA locking_mode = EXCLUSIVE")
+
         return self._conn.cursor()
     def _commit(self):
         return self._conn.commit()
@@ -277,7 +699,7 @@ class YumHistory:
     def txmbr2state(txmbr):
         state = None
         if txmbr.output_state in (TS_INSTALL, TS_TRUEINSTALL):
-            if hasattr(txmbr, 'reinstall'):
+            if txmbr.reinstall:
                 state = 'Reinstall'
             elif txmbr.downgrades:
                 state = 'Downgrade'
@@ -292,8 +714,21 @@ class YumHistory:
 
     def trans_with_pid(self, pid):
         cur = self._get_cursor()
+        if cur is None:
+            return None
         res = executeSQL(cur,
                          """INSERT INTO trans_with_pkgs
+                         (tid, pkgtupid)
+                         VALUES (?, ?)""", (self._tid, pid))
+        return cur.lastrowid
+
+    def trans_skip_pid(self, pid):
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return None
+        
+        res = executeSQL(cur,
+                         """INSERT INTO trans_skip_pkgs
                          (tid, pkgtupid)
                          VALUES (?, ?)""", (self._tid, pid))
         return cur.lastrowid
@@ -303,6 +738,8 @@ class YumHistory:
         if not hasattr(self, '_tid') or state is None:
             return # Not configured to run
         cur = self._get_cursor()
+        if cur is None:
+            return # Should never happen, due to above
         res = executeSQL(cur,
                          """INSERT INTO trans_data_pkgs
                          (tid, pkgtupid, state)
@@ -314,15 +751,73 @@ class YumHistory:
             return # Not configured to run
 
         cur = self._get_cursor()
+        if cur is None:
+            return # Should never happen, due to above
         res = executeSQL(cur,
                          """UPDATE trans_data_pkgs SET done = ?
                          WHERE tid = ? AND pkgtupid = ? AND state = ?
                          """, ('TRUE', self._tid, pid, state))
         self._commit()
+
+    def _trans_rpmdb_problem(self, problem):
+        if not hasattr(self, '_tid'):
+            return # Not configured to run
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return None
+        # str(problem) doesn't work if problem contains unicode(),
+        # unicode(problem) doesn't work in python 2.4.x ... *sigh*.
+        uproblem = to_unicode(problem.__str__())
+        res = executeSQL(cur,
+                         """INSERT INTO trans_rpmdb_problems
+                         (tid, problem, msg)
+                         VALUES (?, ?, ?)""", (self._tid,
+                                               problem.problem,
+                                               uproblem))
+        rpid = cur.lastrowid
+
+        if not rpid:
+            return rpid
+
+        pkgs = {}
+        pkg = problem.pkg
+        pkgs[pkg.pkgtup] = pkg
+        if problem.problem == 'conflicts':
+            for pkg in problem.conflicts:
+                pkgs[pkg.pkgtup] = pkg
+        if problem.problem == 'duplicates':
+            pkgs[problem.duplicate.pkgtup] = problem.duplicate
+
+        for pkg in pkgs.values():
+            pid = self.pkg2pid(pkg)
+            if pkg.pkgtup == problem.pkg.pkgtup:
+                main = 'TRUE'
+            else:
+                main = 'FALSE'
+            res = executeSQL(cur,
+                             """INSERT INTO trans_prob_pkgs
+                             (rpid, pkgtupid, main)
+                             VALUES (?, ?, ?)""", (rpid, pid, main))
+
+        return rpid
+
+    def _trans_cmdline(self, cmdline):
+        if not hasattr(self, '_tid'):
+            return # Not configured to run
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return None
+        res = executeSQL(cur,
+                         """INSERT INTO trans_cmdline
+                         (tid, cmdline)
+                         VALUES (?, ?)""", (self._tid, to_unicode(cmdline)))
         return cur.lastrowid
 
-    def beg(self, rpmdb_version, using_pkgs, txmbrs):
+    def beg(self, rpmdb_version, using_pkgs, txmbrs, skip_packages=[],
+            rpmdb_problems=[], cmdline=None):
         cur = self._get_cursor()
+        if cur is None:
+            return
         res = executeSQL(cur,
                          """INSERT INTO trans_beg
                             (timestamp, rpmdb_version, loginuid)
@@ -340,10 +835,22 @@ class YumHistory:
             state = self.txmbr2state(txmbr)
             self.trans_data_pid_beg(pid, state)
         
+        for pkg in skip_packages:
+            pid   = self.pkg2pid(pkg)
+            self.trans_skip_pid(pid)
+
+        for problem in rpmdb_problems:
+            self._trans_rpmdb_problem(problem)
+
+        if cmdline:
+            self._trans_cmdline(cmdline)
+
         self._commit()
 
     def _log_errors(self, errors):
         cur = self._get_cursor()
+        if cur is None:
+            return
         for error in errors:
             error = to_unicode(error)
             executeSQL(cur,
@@ -357,7 +864,9 @@ class YumHistory:
             return # Not configured to run
 
         cur = self._get_cursor()
-        for error in msg.split('\n'):
+        if cur is None:
+            return # Should never happen, due to above
+        for error in msg.splitlines():
             error = to_unicode(error)
             executeSQL(cur,
                        """INSERT INTO trans_script_stdout
@@ -388,7 +897,11 @@ class YumHistory:
 
     def end(self, rpmdb_version, return_code, errors=None):
         assert return_code or not errors
+        if not hasattr(self, '_tid'):
+            return # Failed at beg() time
         cur = self._get_cursor()
+        if cur is None:
+            return # Should never happen, due to above
         res = executeSQL(cur,
                          """INSERT INTO trans_end
                             (tid, timestamp, rpmdb_version, return_code)
@@ -408,6 +921,63 @@ class YumHistory:
             self._log_errors(errors)
         del self._tid
 
+    def write_addon_data(self, dataname, data):
+        """append data to an arbitrary-named file in the history 
+           addon_path/transaction id location,
+           returns True if write succeeded, False if not"""
+        
+        if not hasattr(self, '_tid'):
+            # maybe we should raise an exception or a warning here?
+            return False
+        
+        if not dataname:
+            return False
+        
+        if not data:
+            return False
+            
+        # make sure the tid dir exists
+        tid_dir = self.conf.addon_path + '/' + str(self._tid)
+
+        if self.conf.writable and not os.path.exists(tid_dir):
+            try:
+                os.makedirs(tid_dir, mode=0700)
+            except (IOError, OSError), e:
+                # emit a warning/raise an exception?
+                return False
+        
+        # cleanup dataname
+        safename = dataname.replace('/', '_')
+        data_fn = tid_dir + '/' + safename
+        try:
+            # open file in append
+            fo = open(data_fn, 'w+')
+            # write data
+            fo.write(to_utf8(data))
+            # flush data
+            fo.flush()
+            fo.close()
+        except (IOError, OSError), e:
+            return False
+        # return
+        return True
+        
+    def return_addon_data(self, tid, item=None):
+        hist_and_tid = self.conf.addon_path + '/' + str(tid) + '/'
+        addon_info = glob.glob(hist_and_tid + '*')
+        addon_names = [ i.replace(hist_and_tid, '') for i in addon_info ]
+        if not item:
+            return addon_names
+        
+        if item not in addon_names:
+            # XXX history needs SOME kind of exception, or warning, I think?
+            return None
+        
+        fo = open(hist_and_tid + item, 'r')
+        data = fo.read()
+        fo.close()
+        return data
+        
     def _old_with_pkgs(self, tid):
         cur = self._get_cursor()
         executeSQL(cur,
@@ -430,9 +1000,9 @@ class YumHistory:
                       ORDER BY name ASC, epoch ASC, state DESC""", (tid,))
         ret = []
         for row in cur:
-            obj = YumHistoryPackage(row[0],row[1],row[2],row[3],row[4], row[5])
+            obj = YumHistoryPackageState(row[0],row[1],row[2],row[3],row[4],
+                                         row[7], row[5])
             obj.done     = row[6] == 'TRUE'
-            obj.state    = row[7]
             obj.state_installed = None
             if _sttxt2stcode[obj.state] in TS_INSTALL_STATES:
                 obj.state_installed = True
@@ -440,11 +1010,70 @@ class YumHistory:
                 obj.state_installed = False
             ret.append(obj)
         return ret
+    def _old_skip_pkgs(self, tid):
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return []
+        executeSQL(cur,
+                   """SELECT name, arch, epoch, version, release, checksum
+                      FROM trans_skip_pkgs JOIN pkgtups USING(pkgtupid)
+                      WHERE tid = ?
+                      ORDER BY name ASC, epoch ASC""", (tid,))
+        ret = []
+        for row in cur:
+            obj = YumHistoryPackage(row[0],row[1],row[2],row[3],row[4], row[5])
+            ret.append(obj)
+        return ret
+    def _old_prob_pkgs(self, rpid):
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return []
+        executeSQL(cur,
+                   """SELECT name, arch, epoch, version, release, checksum, main
+                      FROM trans_prob_pkgs JOIN pkgtups USING(pkgtupid)
+                      WHERE rpid = ?
+                      ORDER BY name ASC, epoch ASC""", (rpid,))
+        ret = []
+        for row in cur:
+            obj = YumHistoryPackage(row[0],row[1],row[2],row[3],row[4], row[5])
+            obj.main = row[6] == 'TRUE'
+            ret.append(obj)
+        return ret
+
+    def _old_problems(self, tid):
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return []
+        executeSQL(cur,
+                   """SELECT rpid, problem, msg
+                      FROM trans_rpmdb_problems
+                      WHERE tid = ?
+                      ORDER BY problem ASC, rpid ASC""", (tid,))
+        ret = []
+        for row in cur:
+            obj = YumHistoryRpmdbProblem(self, row[0], row[1], row[2])
+            ret.append(obj)
+        return ret
+
+    def _old_cmdline(self, tid):
+        cur = self._get_cursor()
+        if cur is None or not self._update_db_file_2():
+            return None
+        executeSQL(cur,
+                   """SELECT cmdline
+                      FROM trans_cmdline
+                      WHERE tid = ?""", (tid,))
+        ret = []
+        for row in cur:
+            return row[0]
+        return None
 
     def old(self, tids=[], limit=None, complete_transactions_only=False):
         """ Return a list of the last transactions, note that this includes
             partial transactions (ones without an end transaction). """
         cur = self._get_cursor()
+        if cur is None:
+            return []
         sql =  """SELECT tid,
                          trans_beg.timestamp AS beg_ts,
                          trans_beg.rpmdb_version AS beg_rv,
@@ -552,15 +1181,31 @@ class YumHistory:
             packages al. la. "yum list". Returns transaction ids. """
         # Search packages ... kind of sucks that it's search not list, pkglist?
 
+        cur = self._get_cursor()
+        if cur is None:
+            return set()
+
         data = _setupHistorySearchSQL(patterns, ignore_case)
-        (need_full, patterns, fields, names) = data
+        (need_full, npatterns, fields, names) = data
 
         ret = []
         pkgtupids = set()
-        for row in self._yieldSQLDataList(patterns, fields, ignore_case):
-            pkgtupids.add(row[0])
 
-        cur = self._get_cursor()
+        if npatterns:
+            for row in self._yieldSQLDataList(npatterns, fields, ignore_case):
+                pkgtupids.add(row[0])
+        else:
+            # Too many patterns, *sigh*
+            pat_max = PATTERNS_MAX
+            if not need_full:
+                pat_max = PATTERNS_INDEXED_MAX
+            for npatterns in yum.misc.seq_max_split(patterns, pat_max):
+                data = _setupHistorySearchSQL(npatterns, ignore_case)
+                (need_full, nps, fields, names) = data
+                assert nps
+                for row in self._yieldSQLDataList(nps, fields, ignore_case):
+                    pkgtupids.add(row[0])
+
         sql =  """SELECT tid FROM trans_data_pkgs WHERE pkgtupid IN """
         sql += "(%s)" % ",".join(['?'] * len(pkgtupids))
         params = list(pkgtupids)
@@ -578,15 +1223,106 @@ class YumHistory:
             tids.add(row[0])
         return tids
 
+    _update_ops_2 = ['''\
+\
+ CREATE TABLE trans_skip_pkgs (
+     tid INTEGER NOT NULL REFERENCES trans_beg,
+     pkgtupid INTEGER NOT NULL REFERENCES pkgtups);
+''', '''\
+\
+ CREATE TABLE trans_cmdline (
+     tid INTEGER NOT NULL REFERENCES trans_beg,
+     cmdline TEXT NOT NULL);
+''', '''\
+\
+ CREATE TABLE trans_rpmdb_problems (
+     rpid INTEGER PRIMARY KEY,
+     tid INTEGER NOT NULL REFERENCES trans_beg,
+     problem TEXT NOT NULL, msg TEXT NOT NULL);
+''', '''\
+\
+ CREATE TABLE trans_prob_pkgs (
+     rpid INTEGER NOT NULL REFERENCES trans_rpmdb_problems,
+     pkgtupid INTEGER NOT NULL REFERENCES pkgtups,
+     main BOOL NOT NULL DEFAULT FALSE);
+''', '''\
+\
+ CREATE VIEW vtrans_data_pkgs AS
+     SELECT tid,name,epoch,version,release,arch,pkgtupid,
+            state,done,
+            name || '-' || epoch || ':' ||
+            version || '-' || release || '.' || arch AS nevra
+     FROM trans_data_pkgs JOIN pkgtups USING(pkgtupid)
+     ORDER BY name;
+''', '''\
+\
+ CREATE VIEW vtrans_with_pkgs AS
+     SELECT tid,name,epoch,version,release,arch,pkgtupid,
+            name || '-' || epoch || ':' ||
+            version || '-' || release || '.' || arch AS nevra
+     FROM trans_with_pkgs JOIN pkgtups USING(pkgtupid)
+     ORDER BY name;
+''', '''\
+\
+ CREATE VIEW vtrans_skip_pkgs AS
+     SELECT tid,name,epoch,version,release,arch,pkgtupid,
+            name || '-' || epoch || ':' ||
+            version || '-' || release || '.' || arch AS nevra
+     FROM trans_skip_pkgs JOIN pkgtups USING(pkgtupid)
+     ORDER BY name;
+''', # NOTE: Old versions of sqlite don't like the normal way to do the next
+     #       view. So we do it with the select. It's for debugging only, so
+     #       no big deal.
+'''\
+\
+ CREATE VIEW vtrans_prob_pkgs2 AS
+     SELECT tid,rpid,name,epoch,version,release,arch,pkgtups.pkgtupid,
+            main,problem,msg,
+            name || '-' || epoch || ':' ||
+            version || '-' || release || '.' || arch AS nevra
+     FROM (SELECT * FROM trans_prob_pkgs,trans_rpmdb_problems WHERE
+           trans_prob_pkgs.rpid=trans_rpmdb_problems.rpid)
+           JOIN pkgtups USING(pkgtupid)
+     ORDER BY name;
+''']
+
+    def _update_db_file_2(self):
+        """ Update to version 2 of history, includes trans_skip_pkgs. """
+        if not self.conf.writable:
+            return False
+
+        if hasattr(self, '_cached_updated_2'):
+            return self._cached_updated_2
+
+        cur = self._get_cursor()
+        if cur is None:
+            return False
+
+        executeSQL(cur, "PRAGMA table_info(trans_skip_pkgs)")
+        #  If we get anything, we're fine. There might be a better way of
+        # saying "anything" but this works.
+        for ob in cur:
+            break
+        else:
+            for op in self._update_ops_2:
+                cur.execute(op)
+            self._commit()
+        self._cached_updated_2 = True
+        return True
+
     def _create_db_file(self):
         """ Create a new history DB file, populating tables etc. """
 
+        self._db_date = time.strftime('%Y-%m-%d')
         _db_file = '%s/%s-%s.%s' % (self.conf.db_path,
                                     'history',
-                                    time.strftime('%Y-%m-%d'),
+                                    self._db_date,
                                     'sqlite')
         if self._db_file == _db_file:
             os.rename(_db_file, _db_file + '.old')
+            # Just in case ... move the journal file too.
+            if os.path.exists(_db_file + '-journal'):
+                os.rename(_db_file  + '-journal', _db_file + '-journal.old')
         self._db_file = _db_file
         
         if self.conf.writable and not os.path.exists(self._db_file):
@@ -638,6 +1374,8 @@ class YumHistory:
  CREATE INDEX i_pkgtup_naevr ON pkgtups (name, arch, epoch, version, release);
 ''']
         for op in ops:
+            cur.execute(op)
+        for op in self._update_ops_2:
             cur.execute(op)
         self._commit()
 

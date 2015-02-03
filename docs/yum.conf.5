@@ -62,6 +62,27 @@ Debug scriptlet output level. 'info' is the default, other
 options are: 'critical', 'emergency', 'error', 'warn' and 'debug'.
 
 .IP
+\fBprotected_packages\fR
+This is a list of packages that yum should never completely remove. They are
+protected via. Obsoletes as well as user/plugin removals.
+
+The default is: yum glob:/etc/yum/protected.d/*.conf
+So any packages which should be protected can do so by including a file in 
+/etc/yum/protected.d with their package name in it.
+
+Also if this configuration is set to anything, then yum will protect the
+package corresponding to the running version of the kernel.
+
+.IP
+\fBprotected_multilib\fR
+Either `1' or `0'. This tells yum whether or not it should perform a check to
+make sure that multilib packages are the same version. For example, if this
+option is off (rpm behaviour) pkgA-1.x86_64 and pkgA-2.i386 can be installed
+at the same time. However this is very rarely desired.
+Install only packages, like the kernel, are exempt from this check.
+The default is `1'.
+
+.IP
 \fBlogfile\fR
 Full directory and file name for where yum should write its log file.
 
@@ -69,9 +90,13 @@ Full directory and file name for where yum should write its log file.
 \fBgpgcheck\fR
 Either `1' or `0'. This tells yum whether or not it should perform a GPG
 signature check on packages. When this is set in the [main] section it sets the
-default for all repositories. This option also determines whether or not an
-install of a package from a local RPM file will be GPG signature checked. The
-default is `0'.
+default for all repositories. 
+The default is `0'.
+
+\fBlocalpkg_gpgcheck\fR
+Either `1' or `0'. This tells yum whether or not it should perform a GPG
+signature check on local packages (packages in a file, not in a repositoy).
+The default is `0'.
 
 .IP
 \fBrepo_gpgcheck\fR
@@ -123,9 +148,13 @@ an i686 package to update an i386 package. Default is `1'.
 
 .IP
 \fBinstallonlypkgs \fR
-List of packages that should only ever be installed, never updated. Kernels
-in particular fall into this category. Defaults to kernel, kernel-smp,
-kernel-bigmem, kernel-enterprise, kernel-debug, kernel-unsupported.
+List of package provides that should only ever be installed, never updated.
+Kernels in particular fall into this category. Defaults to kernel,
+kernel-bigmem, kernel-enterprise, kernel-smp, kernel-modules, kernel-debug, 
+kernel-unsupported, kernel-source, kernel-devel, kernel-PAE, kernel-PAE-debug.
+
+Note that because these are provides, and not just package names, kernel-devel
+will also apply to kernel-debug-devel, etc.
 
 .IP
 \fBinstallonly_limit \fR
@@ -167,6 +196,14 @@ repository will be used. If \fBoverwrite_groups\fR is `0' then the groups
 from all matching repositories will be merged together as one large group.
 
 .IP
+\fBgroupremove_leaf_only \fR
+Either `0' or `1'. Used to determine yum's behaviour when the groupremove
+command is run.  If \fBgroupremove_leaf_only\fR is `0' (default) then
+all packages in the group will be removed.  If \fBgroupremove_leaf_only\fR is
+`1' then only those packages in the group that aren't required by another
+package will be removed.
+
+.IP
 \fBenable_group_conditionals\fR
 Either `0' or `1'. Determines whether yum will allow the use of conditionals
 packages. Default is `1' (package conditionals are allowed).
@@ -198,7 +235,8 @@ diskspace before a RPM transaction is run. Default is `1' (perform the check).
 .IP
 \fBtsflags\fR
 Comma or space separated list of transaction flags to pass to the rpm
-transaction set. These include 'noscripts', 'notriggers', 'nodocs', 'test', and 'repackage'.
+transaction set. These include 'noscripts', 'notriggers', 'nodocs', 'test', 'justdb' and 'nocontexts'. 'repackage' is also available but that does nothing
+with newer rpm versions.
 You can set all/any of them. However, if you don't know what these do in the
 context of an rpm transaction set you're best leaving it alone. Default is
 an empty list.
@@ -269,12 +307,23 @@ default
 
 .IP
 \fBsslverify \fR
-Boolean - should yum verify SSL certificates/hosts at all. Defaults to True
+Boolean - should yum verify SSL certificates/hosts at all. Defaults to True.
+
+Note that the plugin yum-rhn-plugin will force this value to true, and may
+alter other ssl settings (like hostname checking), even if it the machine
+is not registered.
 
 .IP
 \fBsslclientcert \fR
 Path to the SSL client certificate yum should use to connect to repos/remote sites
 Defaults to none.
+
+Note that if you are using curl compiled against NSS (default in Fedora/RHEL),
+curl treats sslclientcert values with the same basename as _identical_. This
+version of yum will check that this isn't true and output an error when the
+repositories "foo" and "bar" violate this, like so:
+
+sslclientcert basename shared between foo and bar
 
 .IP
 \fBsslclientkey \fR
@@ -289,12 +338,36 @@ lot of information about what has happened before, and display it to the user
 with the history info/list/summary commands. yum also provides the
 history undo/redo commands. Defaults to True.
 
+Note that if history is recorded, yum uses that information to see if any
+modifications to the rpmdb have been done outside of yum. These are always bad,
+from yum's point of view, and so yum will issue a warning and automatically
+run some of "yum check" to try and find some of the worst problems altering
+the rpmdb might have caused.
+.IP
+This means that turning this option off will stop yum from being able to
+detect when the rpmdb has changed and thus. it will never warn you or
+automatically run "yum check". The problems will likely still be there, and
+yumdb etc. will still be wrong but yum will not warn you about it.
+
 .IP
 \fBhistory_record_packages \fR
 This is a list of package names that should be recorded as having helped the
 transaction. yum plugins have an API to add themselves to this, so it should not
 normally be necessary to add packages here. Not that this is also used for the
 packages to look for in \-\-version. Defaults to rpm, yum, yum-metadata-parser.
+
+.IP
+\fBhistory_list_view \fR
+Which column of information to display in the "yum history list" command. There
+are currently three options: users, cmds (or commands), auto.
+
+Older versions of yum acted like "users", which always outputs the user who
+initiated the yum transaction. You can now specify "commands" which will instead
+always output the command line of the transaction. You can also specify
+"single-user-commands" which will display the users if there are more than one,
+otherwise it will display the command line.
+
+You can also specify "default" which currently selects "single-user-commands".
 
 .IP
 \fBcommands\fR
@@ -304,11 +377,17 @@ on the command line (eg. "update foo bar baz quux").  None of the short options
 
 .IP
 \fBsyslog_ident \fR
-XXX not implemented yet
+Identification (program name) for syslog messages.
 
 .IP
 \fBsyslog_facility \fR
-XXX not implemented yet
+Facility name for syslog messages, see syslog(3).  Default is `LOG_USER'.
+
+.IP
+\fBsyslog_device \fR
+Where to log syslog messages. Can be a local device (path) or a host:port
+string to use a remote syslog.  If empty or points to a nonexistent device,
+syslog logging is disabled.  Default is `/dev/log'.
 
 .IP
 \fBproxy \fR
@@ -321,6 +400,14 @@ username to use for proxy
 .IP
 \fBproxy_password \fR
 password for this proxy
+
+.IP
+\fBusername \fR
+username to use for basic authentication to a repo or really any url.
+
+.IP
+\fBpassword \fR
+password to use with the username for basic authentication.
 
 .IP
 \fBplugins \fR
@@ -346,7 +433,7 @@ not update the metadata against the repository.  If you find that
 yum is not downloading information on updates as often as you would like
 lower the value of this option. You can also change from the default of using
 seconds to using days, hours or minutes by appending a d, h or m respectively.
-The default is 1.5 hours, to compliment yum-updatesd running once an hour.
+The default is 6 hours, to compliment yum-updatesd running once an hour.
 It's also possible to use the word "never", meaning that the metadata will
 never expire. Note that when using a metalink file the metalink must always
 be newer than the metadata for the repository, due to the validation, so this
@@ -405,8 +492,10 @@ bugtrackers.
 
 .IP
 \fBcolor \fR
-Display colorized output automatically, depending on the output terminal,
-always (using ANSI codes) or never.
+Whether to display colorized output automatically, depending on the output
+terminal, can be changed to always (using ANSI codes) or never.
+Default is `auto'.
+Possible values are: auto, never, always.
 Command-line option: \fB\-\-color\fP
 
 .IP
@@ -497,6 +586,16 @@ be downloaded. The updates list is what is printed when you run "yum update",
 "yum list updates", "yum list obsoletes" and "yum check-update".
 Default is `normal'.
 See color_list_installed_older for possible values.
+
+
+.IP
+\fBclean_requirements_on_remove \fR
+When removing packages (by removal, update or obsoletion) go through each
+package's dependencies. If any of them are no longer required by any other 
+package then also mark them to be removed.
+Boolean (1, 0, True, False, yes,no) Defaults to False
+
+
 
 .SH "[repository] OPTIONS"
 .LP 
@@ -589,6 +688,14 @@ the key is installed unless the \fBassumeyes\fR option is set.
 Multiple URLs may be specified here in the same manner as the \fBbaseurl\fR
 option (above). If a GPG key is required to install a package from a
 repository, all keys specified for that repository will be installed.
+
+.IP
+\fBgpgcakey\fR
+A URL pointing to the ASCII-armored CA key file for the repository. This is a normal 
+gpg public key - but this key will be used to validate detached signatures of all
+other keys. The idea is you are asked to confirm import for this key. After that any other 
+gpg key needed for package or repository verification, if it has a detached signature which matches this
+key will be automatically imported without user confirmation.
 
 .IP
 \fBexclude\fR
@@ -696,6 +803,17 @@ If this is unset it inherits it from the global setting
 password for this proxy.
 If this is unset it inherits it from the global setting
 
+
+.IP
+\fBusername \fR
+username to use for basic authentication to a repo or really any url.
+If this is unset it inherits it from the global setting
+
+.IP
+\fBpassword \fR
+password to use with the username for basic authentication.
+If this is unset it inherits it from the global setting
+
 .IP
 \fBcost \fR
 relative cost of accessing this repository. Useful for weighing one repo's packages
@@ -719,6 +837,14 @@ include=url://to/some/location
 The configuration file will be inserted at the position of the "include=" line.
 Included files may contain further include lines. Yum will abort with an error
 if an inclusion loop is detected.
+
+.SH "GLOB: FOR LIST OPTIONS"
+.LP
+Any of the configurations options which are a list of items can be specfied
+using the glob syntax: \fBglob:/etc/path/somewhere.d/*.conf\fR. This
+will read in all files matching that glob and include all lines in each file
+(excluding comments and blank lines) as items in the list.
+.LP
 
 .SH "VARIABLES"
 .LP
@@ -755,12 +881,25 @@ These will be replaced with the value of the shell environment variable of
 the same name. If the shell environment variable does not exist then the
 configuration file variable will not be replaced.
 
+.LP
+As of 3.2.28, any file in /etc/yum/vars is turned into a variable named after
+the filename (or overrides any of the above variables).
+
+Note that no warnings/errors are given if the files are unreadable, so creating
+files that only root can read may be confusing for users.
+
+Also note that only the first line will be read and all new line 
+characters are removed, as a convenience. However, no other checking is 
+performed on the data. This means it is possible to have bad character 
+data in any value.
 
 .SH "FILES"
 .nf
 /etc/yum/yum.conf
 /etc/yum/repos.d/
 /etc/yum/pluginconf.d/
+/etc/yum/protected.d
+/etc/yum/vars
 
 .SH "SEE ALSO"
 .LP 

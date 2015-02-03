@@ -23,6 +23,7 @@ import os.path
 import sys
 import logging
 import time
+import errno
 
 from yum import Errors
 from yum import plugins
@@ -31,7 +32,7 @@ from yum import _
 from yum.i18n import to_unicode, utf8_width
 import yum.misc
 import cli
-from utils import suppress_keyboard_interrupt_message, show_lock_owner
+from utils import suppress_keyboard_interrupt_message, show_lock_owner, exception2msg
 
 def main(args):
     """This does all the real work"""
@@ -47,7 +48,7 @@ def main(args):
         if e.errno == 32:
             logger.critical(_('\n\nExiting on Broken Pipe'))
         else:
-            logger.critical(_('\n\n%s') % str(e))
+            logger.critical(_('\n\n%s') % exception2msg(e))
         if unlock(): return 200
         return 1
 
@@ -56,14 +57,14 @@ def main(args):
 
         Log the plugin's exit message if one was supplied.
         ''' # ' xemacs hack
-        exitmsg = str(e)
+        exitmsg = exception2msg(e)
         if exitmsg:
             logger.warn('\n\n%s', exitmsg)
         if unlock(): return 200
         return 1
 
     def exFatal(e):
-        logger.critical('\n\n%s', to_unicode(e.value))
+        logger.critical('\n\n%s', exception2msg(e.value))
         if unlock(): return 200
         return 1
 
@@ -75,6 +76,15 @@ def main(args):
             return 200
         return 0
 
+    def rpmdb_warn_checks():
+        try:
+            probs = base._rpmdb_warn_checks(out=verbose_logger.info, warn=False)
+        except Errors.YumBaseError, e:
+            # This is mainly for PackageSackError from rpmdb.
+            verbose_logger.info(_(" Yum checks failed: %s"), exception2msg(e))
+            probs = []
+        if not probs:
+            verbose_logger.info(_(" You could try running: rpm -Va --nofiles --nodigest"))
 
     logger = logging.getLogger("yum.main")
     verbose_logger = logging.getLogger("yum.verbose.main")
@@ -91,17 +101,38 @@ def main(args):
     except Errors.YumBaseError, e:
         return exFatal(e)
 
+    # Try to open the current directory to see if we have 
+    # read and write access. If not, chdir to /
+    try:
+        f = open(".")
+    except IOError, e:
+        if e.errno == errno.EACCES:
+            logger.critical(_('No read/write access in current directory, moving to /'))
+            os.chdir("/")
+    else:
+        close(f)
+
     lockerr = ""
     while True:
         try:
             base.doLock()
         except Errors.LockError, e:
-            if "%s" %(e.msg,) != lockerr:
-                lockerr = "%s" %(e.msg,)
+            if exception2msg(e) != lockerr:
+                lockerr = exception2msg(e)
                 logger.critical(lockerr)
-            logger.critical(_("Another app is currently holding the yum lock; waiting for it to exit..."))
-            show_lock_owner(e.pid, logger)
-            time.sleep(2)
+            if (e.errno not in (errno.EPERM, errno.EACCES) and
+                not base.conf.exit_on_lock):
+                logger.critical(_("Another app is currently holding the yum lock; waiting for it to exit..."))
+                tm = 0.1
+                if show_lock_owner(e.pid, logger):
+                    tm = 2
+                time.sleep(tm)
+            elif e.errno in (errno.EPERM, errno.EACCES):
+                logger.critical(_("Can't create lock file; exiting"))
+                return 1
+            else:
+                logger.critical(_("Another app is currently holding the yum lock; exiting as configured by exit_on_lock"))
+                return 1
         else:
             break
 
@@ -111,7 +142,7 @@ def main(args):
         return exPluginExit(e)
     except Errors.YumBaseError, e:
         result = 1
-        resultmsgs = [unicode(e)]
+        resultmsgs = [exception2msg(e)]
     except KeyboardInterrupt:
         return exUserCancel()
     except IOError, e:
@@ -152,7 +183,7 @@ def main(args):
         return exPluginExit(e)
     except Errors.YumBaseError, e:
         result = 1
-        resultmsgs = [unicode(e)]
+        resultmsgs = [exception2msg(e)]
     except KeyboardInterrupt:
         return exUserCancel()
     except IOError, e:
@@ -169,10 +200,10 @@ def main(args):
             prefix = _('Error: %s')
             prefix2nd = (' ' * (utf8_width(prefix) - 2))
             logger.critical(prefix, msg.replace('\n', '\n' + prefix2nd))
-        if not base.conf.skip_broken:
-            verbose_logger.info(_(" You could try using --skip-broken to work around the problem"))
-        if not base._rpmdb_warn_checks(out=verbose_logger.info, warn=False):
-            verbose_logger.info(_(" You could try running: rpm -Va --nofiles --nodigest"))
+        if base._depsolving_failed:
+            if not base.conf.skip_broken:
+                verbose_logger.info(_(" You could try using --skip-broken to work around the problem"))
+            rpmdb_warn_checks()
         if unlock(): return 200
         return 1
     elif result == 2:
@@ -199,14 +230,17 @@ def main(args):
     except IOError, e:
         return exIOError(e)
 
-    # rpm_check_debug failed.
+    # rpm ts.check() failed.
     if type(return_code) == type((0,)) and len(return_code) == 2:
         (result, resultmsgs) = return_code
         for msg in resultmsgs:
             logger.critical("%s", msg)
-        if not base._rpmdb_warn_checks(out=verbose_logger.info, warn=False):
-            verbose_logger.info(_(" You could try running: rpm -Va --nofiles --nodigest"))
+        rpmdb_warn_checks()
         return_code = result
+        if base._ts_save_file:
+            verbose_logger.info(_("Your transaction was saved, rerun it with: yum load-transaction %s") % base._ts_save_file)
+    elif return_code < 0:
+        return_code = 1 # Means the pre-transaction checks failed...
     else:
         verbose_logger.log(logginglevels.INFO_2, _('Complete!'))
 

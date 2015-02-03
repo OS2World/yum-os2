@@ -157,9 +157,30 @@ class SimpleObsoletesTests(OperationsTests):
         self.assert_(res=='ok', msg)
         self.assertResult((p.obsoletes_x86_64, p.requires_obsoletes))
 
-    def testObsoletex86_64ToMultiarch(self):
+    def testObsoletex86_64ToMultiarch1(self):
         p = self.pkgs
         res, msg = self.runOperation(['update'], [p.installed_x86_64], [p.obsoletes_i386, p.obsoletes_x86_64])
+        self.assert_(res=='ok', msg)
+        self.assertResult((p.obsoletes_x86_64,))
+    def testObsoletex86_64ToMultiarch2(self):
+        p = self.pkgs
+        res, msg = self.runOperation(['update'], [p.installed_x86_64], [p.obsoletes_x86_64, p.obsoletes_i386])
+        self.assert_(res=='ok', msg)
+        self.assertResult((p.obsoletes_x86_64,))
+    def testInstallObsoletex86_64ToMultiarch1(self):
+        # Found by BZ 593349, libgfortran43/44
+        p = self.pkgs
+        res, msg = self.runOperation(['install', 'zsh.x86_64'], [], [p.installed_x86_64, p.installed_i386, p.obsoletes_x86_64, p.obsoletes_i386])
+        self.assert_(res=='ok', msg)
+        self.assertResult((p.obsoletes_x86_64,))
+    def testInstallObsoletex86_64ToMultiarch2(self):
+        p = self.pkgs
+        res, msg = self.runOperation(['install', 'zsh.i386'], [], [p.installed_x86_64, p.installed_i386, p.obsoletes_x86_64, p.obsoletes_i386])
+        self.assert_(res=='ok', msg)
+        self.assertResult((p.obsoletes_i386,))
+    def testInstallObsoletex86_64ToMultiarch3(self):
+        p = self.pkgs
+        res, msg = self.runOperation(['install', 'zsh'], [], [p.installed_noarch, p.obsoletes_x86_64, p.obsoletes_i386])
         self.assert_(res=='ok', msg)
         self.assertResult((p.obsoletes_x86_64,))
     def testObsoletex86_64ToMultiarchForDependency(self):
@@ -539,10 +560,7 @@ class SimpleObsoletesTests(OperationsTests):
         res, msg = self.runOperation(['install', 'dapl-2.0.15'], rps, aps)
 
         self.assert_(res=='ok', msg)
-        # This will almost certainly fail, but it's pretty weird:
-        self.assertResult((all['arp3'], all['aoop1'], all['aoop2']))
-        # FIXME: Optimally we'd get:
-        # self.assertResult((all['arp3'], all['arp4']))
+        self.assertResult((all['arp3'], all['arp4']))
     def testRLDaplMessWeirdUp1(self):
         rps, aps, ret, all = self._helperRLDaplMess()
         res, msg = self.runOperation(['update', 'dapl-1.2.1.1-7'], rps, aps)
@@ -561,10 +579,7 @@ class SimpleObsoletesTests(OperationsTests):
         res, msg = self.runOperation(['update', 'dapl-2.0.15'], rps, aps)
 
         self.assert_(res=='ok', msg)
-        # This will almost certainly fail, but it's pretty weird:
-        self.assertResult((all['arp3'], all['aoop1'], all['aoop2']))
-        # FIXME: Optimally we'd get:
-        # self.assertResult((all['arp3'], all['arp4']))
+        self.assertResult((all['arp3'], all['arp4']))
 
     def testRLDaplFixUpdateNotInstall(self):
         rps, aps, ret, all = self._helperRLDaplMess()

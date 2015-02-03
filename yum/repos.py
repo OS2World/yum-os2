@@ -32,9 +32,12 @@ class _wrap_ayum_getKeyForRepo:
         we have a seperate class).
         A "better" fix might be to explicitly pass the YumBase instance to
         the callback ... API change! """
-    def __init__(self, ayum):
+    def __init__(self, ayum, ca=False):
         self.ayum = weakref(ayum)
+        self.ca = ca
     def __call__(self, repo, callback=None):
+        if self.ca:
+            return self.ayum.getCAKeyForRepo(repo, callback)
         return self.ayum.getKeyForRepo(repo, callback)
 
 class RepoStorage:
@@ -57,6 +60,7 @@ class RepoStorage:
         # even quasi-useful
         # defaults to what is probably sane-ish
         self.gpg_import_func = _wrap_ayum_getKeyForRepo(ayum)
+        self.gpgca_import_func = _wrap_ayum_getKeyForRepo(ayum, ca=True)
         self.confirm_func = None
 
         # This allow listEnabled() to be O(1) most of the time.
@@ -77,8 +81,13 @@ class RepoStorage:
 
         for repo in repos:
             repo.setup(self.ayum.conf.cache, self.ayum.mediagrabber,
-                   gpg_import_func = self.gpg_import_func, confirm_func=self.confirm_func)
-
+                   gpg_import_func = self.gpg_import_func, confirm_func=self.confirm_func,
+                   gpgca_import_func = self.gpgca_import_func)
+            # if we come back from setup NOT enabled then mark as disabled
+            # so nothing else touches us
+            if not repo.enabled:
+                self.disableRepo(repo.id)
+                
         self._setup = True
         self.ayum.plugins.run('postreposetup')
         
@@ -101,9 +110,15 @@ class RepoStorage:
             repoobj.quick_enable_disable = self.quick_enable_disable
         else:
             self._cache_enabled_repos = None
+        #  At least pulp reuses RepoStorage but doesn't have a "real" YumBase()
+        # so we can't guarantee new YumBase() attrs. exist.
+        if not hasattr(self.ayum, '_override_sigchecks'):
+            repoobj._override_sigchecks = False
+        else:
+            repoobj._override_sigchecks = self.ayum._override_sigchecks
 
     def delete(self, repoid):
-        if self.repos.has_key(repoid):
+        if repoid in self.repos:
             thisrepo = self.repos[repoid]
             thisrepo.close()
             del self.repos[repoid]
@@ -210,7 +225,7 @@ class RepoStorage:
         for repo in self.repos.values():
             repo.old_base_cache_dir = repo.basecachedir
             repo.basecachedir = cachedir
-            
+
 
     def setProgressBar(self, obj):
         """sets the progress bar for downloading files from repos"""

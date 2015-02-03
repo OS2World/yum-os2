@@ -40,7 +40,7 @@ if not _use_iniparse:
 import rpmUtils.transaction
 import Errors
 import types
-from misc import get_uuid
+from misc import get_uuid, read_in_items_from_dot_dir
 
 # Alter/patch these to change the default checking...
 __pkgs_gpgcheck_default__ = False
@@ -55,9 +55,11 @@ class Option(object):
     definition easy and consise.
     '''
 
-    def __init__(self, default=None):
+    def __init__(self, default=None, parse_default=False):
         self._setattrname()
         self.inherit = False
+        if parse_default:
+            default = self.parse(default)
         self.default = default
 
     def _setattrname(self):
@@ -87,7 +89,7 @@ class Option(object):
         @param value: The value to set the option to.
         @return: Nothing.
         '''
-        # Only try to parse if its a string
+        # Only try to parse if it's a string
         if isinstance(value, basestring):
             try:
                 value = self.parse(value)
@@ -155,13 +157,14 @@ class ListOption(Option):
     An option containing a list of strings.
     """
 
-    def __init__(self, default=None):
+    def __init__(self, default=None, parse_default=False):
         if default is None:
             default = []
-        super(ListOption, self).__init__(default)
+        super(ListOption, self).__init__(default, parse_default)
 
     def parse(self, s):
-        """Converts a string from the config file to a workable list
+        """Converts a string from the config file to a workable list, parses
+           globdir: paths as foo.d-style dirs
 
         Commas and spaces are used as separators for the list
         """
@@ -169,7 +172,15 @@ class ListOption(Option):
         # to sub the \n with a space and then read the lines
         s = s.replace('\n', ' ')
         s = s.replace(',', ' ')
-        return s.split()
+        results = []
+        for item in s.split():
+            if item.startswith('glob:'):
+                thisglob = item.replace('glob:', '')
+                results.extend(read_in_items_from_dot_dir(thisglob))
+                continue
+            results.append(item)
+
+        return results
 
     def tostring(self, value):
         return '\n '.join(value)
@@ -217,8 +228,9 @@ class UrlListOption(ListOption):
     Option for handling lists of URLs with validation of the URL scheme.
     '''
 
-    def __init__(self, default=None, schemes=('http', 'ftp', 'file', 'https')):
-        super(UrlListOption, self).__init__(default)
+    def __init__(self, default=None, schemes=('http', 'ftp', 'file', 'https'),
+                 parse_default=False):
+        super(UrlListOption, self).__init__(default, parse_default)
 
         # Hold a UrlOption instance to assist with parsing
         self._urloption = UrlOption(schemes=schemes)
@@ -228,8 +240,15 @@ class UrlListOption(ListOption):
         s = s.replace('\n', ' ')
         s = s.replace(',', ' ')
         items = [ item.replace(' ', '%20') for item in shlex.split(s) ]
-        s = ' '.join(items)
-        for url in super(UrlListOption, self).parse(s):
+        tmp = []
+        for item in items:
+            if item.startswith('glob:'):
+                thisglob = item.replace('glob:', '')
+                tmp.extend(read_in_items_from_dot_dir(thisglob))
+                continue
+            tmp.append(item)
+
+        for url in super(UrlListOption, self).parse(' '.join(tmp)):
             out.append(self._urloption.parse(url))
         return out
 
@@ -604,7 +623,8 @@ class StartupConf(BaseConfig):
     pluginconfpath = ListOption(['/@unixroot/etc/yum/pluginconf.d'])
     gaftonmode = BoolOption(False)
     syslog_ident = Option()
-    syslog_facility = Option('LOG_DAEMON')
+    syslog_facility = Option('LOG_USER')
+    syslog_device = Option('/dev/log')
     persistdir = Option('/var/lib/yum')
     
 class YumConf(StartupConf):
@@ -628,6 +648,8 @@ class YumConf(StartupConf):
     proxy = UrlOption(schemes=('http', 'ftp', 'https'), allow_none=True)
     proxy_username = Option()
     proxy_password = Option()
+    username = Option()
+    password = Option()
     installonlypkgs = ListOption(['kernel', 'kernel-bigmem',
             'kernel-enterprise','kernel-smp', 'kernel-modules', 'kernel-debug',
             'kernel-unsupported', 'kernel-source', 'kernel-devel', 'kernel-PAE',
@@ -654,11 +676,13 @@ class YumConf(StartupConf):
     # FIXME: rename gpgcheck to pkgs_gpgcheck
     gpgcheck = BoolOption(__pkgs_gpgcheck_default__)
     repo_gpgcheck = BoolOption(__repo_gpgcheck_default__)
+    localpkg_gpgcheck = BoolOption(__pkgs_gpgcheck_default__)
     obsoletes = BoolOption(True)
     showdupesfromrepos = BoolOption(False)
     enabled = BoolOption(True)
     enablegroups = BoolOption(True)
     enable_group_conditionals = BoolOption(True)
+    groupremove_leaf_only = BoolOption(False)
     group_package_types = ListOption(['mandatory', 'default'])
     
     timeout = FloatOption(30.0) # FIXME: Should use variation of SecondsOption
@@ -670,6 +694,7 @@ class YumConf(StartupConf):
     metadata_expire = SecondsOption(60 * 60 * 6) # Time in seconds (6h).
     # Time in seconds (1 day). NOTE: This isn't used when using metalinks
     mirrorlist_expire = SecondsOption(60 * 60 * 24)
+    # XXX rpm_check_debug is unused, left around for API compatibility for now
     rpm_check_debug = BoolOption(True)
     disable_excludes = ListOption()    
     skip_broken = BoolOption(False)
@@ -715,6 +740,22 @@ class YumConf(StartupConf):
 
     rpmverbosity = Option('info')
 
+    protected_packages = ListOption("yum, glob:/etc/yum/protected.d/*.conf",
+                                    parse_default=True)
+    protected_multilib = BoolOption(True)
+    exit_on_lock = BoolOption(False)
+    
+    loadts_ignoremissing = BoolOption(False)
+    loadts_ignorerpm = BoolOption(False)
+    
+    clean_requirements_on_remove = BoolOption(False)
+
+
+    history_list_view = SelectionOption('single-user-commands',
+                                        ('single-user-commands', 'users',
+                                         'commands'),
+                                     mapper={'cmds'          : 'commands',
+                                             'default' :'single-user-commands'})
     _reposlist = []
 
     def dump(self):
@@ -731,7 +772,7 @@ class YumConf(StartupConf):
             if isinstance(getattr(self, attr), types.MethodType):
                 continue
             res = getattr(self, attr)
-            if not res:
+            if not res and type(res) not in (type(False), type(0)):
                 res = ''
             if type(res) == types.ListType:
                 res = ',\n   '.join(res)
@@ -764,6 +805,7 @@ class RepoConf(BaseConfig):
     metalink   = UrlOption()
     mediaid = Option()
     gpgkey = UrlListOption()
+    gpgcakey = UrlListOption()
     exclude = ListOption() 
     includepkgs = ListOption() 
 
@@ -772,6 +814,8 @@ class RepoConf(BaseConfig):
     proxy_password = Inherit(YumConf.proxy_password)
     retries = Inherit(YumConf.retries)
     failovermethod = Inherit(YumConf.failovermethod)
+    username = Inherit(YumConf.username)
+    password = Inherit(YumConf.password)
 
     # FIXME: rename gpgcheck to pkgs_gpgcheck
     gpgcheck = Inherit(YumConf.gpgcheck)
@@ -858,13 +902,15 @@ def readMainConfig(startupconf):
     yumvars['arch'] = startupconf.arch
     yumvars['releasever'] = startupconf.releasever
     yumvars['uuid'] = startupconf.uuid
+    # Note: We don't setup the FS yumvars here, because we want to be able to
+    #       use the core yumvars in persistdir. Which is the base of FS yumvars.
     
     # Read [main] section
     yumconf = YumConf()
     yumconf.populate(startupconf._parser, 'main')
 
     # Apply the installroot to directory options
-    for option in ('cachedir', 'logfile', 'persistdir'):
+    def _apply_installroot(yumconf, option):
         path = getattr(yumconf, option)
         ir_path = yumconf.installroot + path
         ir_path = ir_path.replace('//', '/') # os.path.normpath won't fix this and
@@ -872,6 +918,27 @@ def readMainConfig(startupconf):
         ir_path = varReplace(ir_path, yumvars)
         setattr(yumconf, option, ir_path)
     
+    # Read the FS yumvars
+    try:
+        dir_fsvars = yumconf.installroot + "/etc/yum/vars/"
+        fsvars = os.listdir(dir_fsvars)
+    except OSError:
+        fsvars = []
+    for fsvar in fsvars:
+        if os.path.islink(dir_fsvars + fsvar):
+            continue
+        try:
+            val = open(dir_fsvars + fsvar).readline()
+            if val and val[-1] == '\n':
+                val = val[:-1]
+        except (OSError, IOError):
+            continue
+        yumvars[fsvar] = val
+
+    # These can use the above FS yumvars
+    for option in ('cachedir', 'logfile', 'persistdir'):
+        _apply_installroot(yumconf, option)
+
     # Add in some extra attributes which aren't actually configuration values 
     yumconf.yumvar = yumvars
     yumconf.uid = 0
@@ -956,6 +1023,9 @@ def _getsysver(installroot, distroverpkg):
             else:
                 raise Errors.YumBaseError("Error: " + str(e))
         raise Errors.YumBaseError("Error: " + str(e))
+    except rpm.error, e:
+        # This is the "new" code for "cannot open rpmdb", 4.8.0 ish
+        raise Errors.YumBaseError("Error: " + str(e))
     # we're going to take the first one - if there is more than one of these
     # then the user needs a beating
     if idx.count() == 0:
@@ -980,13 +1050,35 @@ def writeRawRepoFile(repo,only=None):
         return
 
     ini = INIConfig(open(repo.repofile))
+    # b/c repoids can have $values in them we need to map both ways to figure
+    # out which one is which
+    section_id = repo.id
+    if repo.id not in ini._sections:
+        for sect in ini._sections.keys():
+            if varReplace(sect, repo.yumvar) == repo.id:
+                section_id = sect
+    
     # Updated the ConfigParser with the changed values    
     cfgOptions = repo.cfg.options(repo.id)
     for name,value in repo.iteritems():
+        if value is None: # Proxy
+            continue
+
+        if only is not None and name not in only:
+            continue
+
         option = repo.optionobj(name)
-        if option.default != value or name in cfgOptions :
-            if only == None or name in only:
-                ini[repo.id][name] = option.tostring(value)
+        ovalue = option.tostring(value)
+        #  If the value is the same, but just interpreted ... when we don't want
+        # to keep the interpreted values.
+        if (name in ini[section_id] and
+            ovalue == varReplace(ini[section_id][name], yumvar)):
+            ovalue = ini[section_id][name]
+
+        if name not in cfgOptions and option.default == value:
+            continue
+
+        ini[section_id][name] = ovalue
     fp =file(repo.repofile,"w")               
     fp.write(str(ini))
     fp.close()

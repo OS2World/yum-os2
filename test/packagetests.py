@@ -8,7 +8,6 @@ class InPrcoRangePackageTests(unittest.TestCase):
 
     def setUp(self):
         self.po = packages.RpmBase()
-        self.po.rel = 10
         self.po.prco['provides'].append(("seth", "EQ", (1, 2, 3)))
         self.po.prco['requires'].append(("foo", "GE", (4, 5, None)))
 
@@ -252,6 +251,7 @@ class RangeCompareTests(unittest.TestCase):
 
         for requires, provides, result in (
             (('foo', 'EQ', ('0', '1.4.4', '0')),   ('foo', 'EQ', ('0', '1.4.4', '0')),  1),
+            (('foo', 'EQ', ('0', '1.4.4', '0')),   ('foo', 'EQ', (None, '1.4.4', '0')), 1),
             (('foo', 'EQ', ('0', '1.4.4', '0')),   ('foo', 'EQ', ('0', '1.4.4', None)), 1),
             (('foo', 'EQ', ('0', '1.4.4', None)),  ('foo', 'EQ', ('0', '1.4.4', '8')),  1),
             (('foo', 'LT', ('0', '1.5.4', None)),  ('foo', 'EQ', ('0', '1.4.4', '7')),  1),

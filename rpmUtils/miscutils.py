@@ -37,10 +37,16 @@ def compareEVR((e1, v1, r1), (e2, v2, r2)):
     # return 1: a is newer than b
     # 0: a and b are the same version
     # -1: b is newer than a
-    e1 = str(e1)
+    if e1 is None:
+        e1 = '0'
+    else:
+        e1 = str(e1)
     v1 = str(v1)
     r1 = str(r1)
-    e2 = str(e2)
+    if e2 is None:
+        e2 = '0'
+    else:
+        e2 = str(e2)
     v2 = str(v2)
     r2 = str(r2)
     #print '%s, %s, %s vs %s, %s, %s' % (e1, v1, r1, e2, v2, r2)
@@ -48,6 +54,10 @@ def compareEVR((e1, v1, r1), (e2, v2, r2)):
     #print '%s, %s, %s vs %s, %s, %s = %s' % (e1, v1, r1, e2, v2, r2, rc)
     return rc
 
+def compareVerOnly(v1, v2):
+    """compare version strings only using rpm vercmp"""
+    return compareEVR(('', v1, ''), ('', v2, ''))
+    
 def checkSig(ts, package):
     """Takes a transaction set and a package, check it's sigs, 
     return 0 if they are all fine
@@ -170,45 +180,45 @@ def rangeCompare(reqtuple, provtuple):
 
     # does not match unless
     if rc >= 1:
-        if reqf in ['GT', 'GE', 4, 12]:
+        if reqf in ['GT', 'GE', 4, 12, '>', '>=']:
             return 1
-        if reqf in ['EQ', 8]:
-            if f in ['LE', 10, 'LT', 2]:
-                return 1                
-        if reqf in ['LE', 'LT', 'EQ', 10, 2, 8]:
-            if f in ['LE', 'LT', 10, 2]:
+        if reqf in ['EQ', 8, '=']:
+            if f in ['LE', 10, 'LT', 2,'<=', '<']:
+                return 1
+        if reqf in ['LE', 'LT', 'EQ', 10, 2, 8, '<=', '<', '=']:
+            if f in ['LE', 'LT', 10, 2, '<=', '<']:
                 return 1
 
     if rc == 0:
-        if reqf in ['GT', 4]:
-            if f in ['GT', 'GE', 4, 12]:
+        if reqf in ['GT', 4, '>']:
+            if f in ['GT', 'GE', 4, 12, '>', '>=']:
                 return 1
-        if reqf in ['GE', 12]:
-            if f in ['GT', 'GE', 'EQ', 'LE', 4, 12, 8, 10]:
+        if reqf in ['GE', 12, '>=']:
+            if f in ['GT', 'GE', 'EQ', 'LE', 4, 12, 8, 10, '>', '>=', '=', '<=']:
                 return 1
-        if reqf in ['EQ', 8]:
-            if f in ['EQ', 'GE', 'LE', 8, 12, 10]:
+        if reqf in ['EQ', 8, '=']:
+            if f in ['EQ', 'GE', 'LE', 8, 12, 10, '=', '>=', '<=']:
                 return 1
-        if reqf in ['LE', 10]:
-            if f in ['EQ', 'LE', 'LT', 'GE', 8, 10, 2, 12]:
+        if reqf in ['LE', 10, '<=']:
+            if f in ['EQ', 'LE', 'LT', 'GE', 8, 10, 2, 12, '=', '<=', '<' , '>=']:
                 return 1
-        if reqf in ['LT', 2]:
-            if f in ['LE', 'LT', 10, 2]:
+        if reqf in ['LT', 2, '<']:
+            if f in ['LE', 'LT', 10, 2, '<=', '<']:
                 return 1
     if rc <= -1:
-        if reqf in ['GT', 'GE', 'EQ', 4, 12, 8]:
-            if f in ['GT', 'GE', 4, 12]:
+        if reqf in ['GT', 'GE', 'EQ', 4, 12, 8, '>', '>=', '=']:
+            if f in ['GT', 'GE', 4, 12, '>', '>=']:
                 return 1
-        if reqf in ['LE', 'LT', 10, 2]:
+        if reqf in ['LE', 'LT', 10, 2, '<=', '<']:
             return 1
 #                if rc >= 1:
-#                    if reqf in ['GT', 'GE', 4, 12]:
+#                    if reqf in ['GT', 'GE', 4, 12, '>', '>=']:
 #                        return 1
 #                if rc == 0:
-#                    if reqf in ['GE', 'LE', 'EQ', 8, 10, 12]:
+#                    if reqf in ['GE', 'LE', 'EQ', 8, 10, 12, '>=', '<=', '=']:
 #                        return 1
 #                if rc <= -1:
-#                    if reqf in ['LT', 'LE', 2, 10]:
+#                    if reqf in ['LT', 'LE', 2, 10, '<', '<=']:
 #                        return 1
 
     return 0
@@ -341,11 +351,17 @@ def rpm2cpio(fdno, out=sys.stdout, bufsize=2048):
         if tmp == "": break
         out.write(tmp)
     f.close()
-                                                                                
+                 
 def formatRequire (name, version, flags):
+    '''
+    Return a human readable requirement string (ex.  foobar >= 2.0)
+    @param name: requirement name (ex. foobar)
+    @param version: requirent version (ex. 2.0)
+    @param flags: binary flags ( 0010 = equal, 0100 = greater than, 1000 = less than )
+    '''
     s = name
     
-    if flags:
+    if flags and (type(flags) == type(0) or type(flags) == type(0L)): # Flag must be set and a int (or a long, now)
         if flags & (rpm.RPMSENSE_LESS | rpm.RPMSENSE_GREATER |
                     rpm.RPMSENSE_EQUAL):
             s = s + " "
@@ -358,6 +374,7 @@ def formatRequire (name, version, flags):
             if version:
                 s = "%s %s" %(s, version)
     return s
+
     
 def flagToString(flags):
     flags = flags & 0xf
