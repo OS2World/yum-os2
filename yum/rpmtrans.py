@@ -295,6 +295,8 @@ class RPMTransaction:
         # but we're using the right path inside.
         if self.base.conf.installroot == '/':
             return filename
+        if self.base.conf.installroot == '/@unixroot':
+            return filename
 
         return filename.replace(os.path.normpath(self.base.conf.installroot),'')
 
