@@ -958,7 +958,7 @@ def readMainConfig(startupconf):
     
     return yumconf
 
-def readVersionGroupsConfig(configfile="/etc/yum/version-groups.conf"):
+def readVersionGroupsConfig(configfile="/@unixroot/etc/yum/version-groups.conf"):
     parser = ConfigParser()
     confpp_obj = ConfigPreProcessor(configfile)
     try:
