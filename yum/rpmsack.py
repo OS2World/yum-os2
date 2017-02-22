@@ -366,7 +366,8 @@ class RPMDBPackageSack(PackageSackBase):
             pkg = self.searchNevra(n, e, v, r, a)
             if not pkg:
                 # Wibble?
-                self._deal_with_bad_rpmdbcache("dCDPT(pkg checksums)")
+                self._deal_with_bad_rpmdbcache("dCDPT(pkg checksums): %s" %
+                                               txmbr)
                 continue
 
             pkg = pkg[0]
@@ -575,7 +576,7 @@ class RPMDBPackageSack(PackageSackBase):
             if repat.match(epoch + ":%(name)s-%(version)s-%(release)s.%(arch)s"
                            % hdr):
                 return True
-            if repat.match("%(name)s-%(epoch)s:%(version)s-%(release)s.%(arch)s"
+            if repat.match("%(name)s-" + epoch + ":%(version)s-%(release)s.%(arch)s"
                            % hdr):
                 return True
         return False
@@ -993,7 +994,8 @@ class RPMDBPackageSack(PackageSackBase):
             if fo.readline() != '': # Should be EOF
                 return
         except ValueError:
-            self._deal_with_bad_rpmdbcache("pkg checksums")
+            self._deal_with_bad_rpmdbcache("pkg checksums %s-%s:%s-%s.%s" %
+                                           (n, e, v, r, a))
             return
 
         if not load_packages:
@@ -1227,7 +1229,7 @@ class RPMDBPackageSack(PackageSackBase):
                 if not pkgs:
                     self._pkgname_fails.add(name)
             else:
-                pkgs = self.returnPkgs()
+                pkgs = self.returnPackages()
             for po in pkgs:
                 for tag in ('arch', 'rel', 'ver', 'epoch'):
                     if loc[tag] is not None and loc[tag] != getattr(po, tag):
