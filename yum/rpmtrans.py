@@ -317,6 +317,7 @@ class RPMTransaction:
             self._ts_done = open(ts_done_fn, 'w')
         except (IOError, OSError), e:
             self.display.errorlog('could not open ts_done file: %s' % e)
+            self._ts_done.close()
             self._ts_done = None
             return False
         self._fdSetCloseOnExec(self._ts_done.fileno())
@@ -334,6 +335,7 @@ class RPMTransaction:
             #  Having incomplete transactions is probably worse than having
             # nothing.
             self.display.errorlog('could not write to ts_done file: %s' % e)
+            self._ts_done.close()
             self._ts_done = None
             misc.unlink_f(self.ts_done_fn)
 
@@ -423,6 +425,7 @@ class RPMTransaction:
             fo = open(tsfn, 'w')
         except (IOError, OSError), e:
             self.display.errorlog('could not open ts_all file: %s' % e)
+            self._ts_done.close()
             self._ts_done = None
             return
 
@@ -436,7 +439,9 @@ class RPMTransaction:
             #  Having incomplete transactions is probably worse than having
             # nothing.
             self.display.errorlog('could not write to ts_all file: %s' % e)
+            fo.close()
             misc.unlink_f(tsfn)
+            self._ts_done.close()
             self._ts_done = None
 
     def callback( self, what, bytes, total, h, user ):
