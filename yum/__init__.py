@@ -1555,6 +1555,8 @@ class YumBase(depsolve.Depsolve):
             if hasattr(cb, i):
                 fn = getattr(cb, i)
                 try:
+                    if i == 'ts_done_fn' and hasattr(cb, '_ts_done'):
+                        getattr(cb, '_ts_done').close()
                     misc.unlink_f(fn)
                 except (IOError, OSError), e:
                     self.logger.critical(_('Failed to remove transaction file %s') % fn)
