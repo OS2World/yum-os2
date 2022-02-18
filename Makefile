@@ -12,7 +12,7 @@ PKGNAME = yum
 VERSION=$(shell awk '/Version:/ { print $$2 }' ${PKGNAME}.spec)
 RELEASE=$(shell awk '/Release:/ { print $$2 }' ${PKGNAME}.spec)
 CVSTAG=yum-$(subst .,_,$(VERSION)-$(RELEASE))
-PYTHON=python.exe
+PYTHON=python2.7.exe
 WEBHOST = yum.baseurl.org
 WEB_DOC_PATH = /srv/projects/yum/web/download/docs/yum-api/
 
